@@ -5,6 +5,11 @@ import {
   NotFoundError,
   ForbiddenError,
 } from "~~/infra/errors.js";
+import {
+  getClassName,
+  getSkillBranch,
+  getTierInfo,
+} from "~~/app/utils/solareTier.js";
 
 const VALID_REGIONS = ["SA", "NA", "EU", "KR", "JP", "RU", "TR", "TW"];
 
@@ -678,11 +683,40 @@ async function getOverlayData({ nick, region, token } = {}) {
   };
 }
 
+async function getChatSummary({ nick, region, token } = {}) {
+  const data = await getOverlayData({ nick, region, token });
+
+  const className = getClassName(data.class_type);
+  const userNickname = data.user_nickname;
+  const spec = getSkillBranch(data.class_type, data.skill_branch_type);
+  const ranking = data.current_ranking;
+  const rating = data.rating;
+  const solareTierObject = getTierInfo(rating, ranking);
+  const solareTierName = solareTierObject.name;
+  const selectedRegion = data.region;
+  const overall = data.overall;
+  const session = data.session;
+
+  const outputPart1 = `[${selectedRegion}] ${userNickname} (${className} ${spec}) — Rank #${ranking}`;
+  const outputPart3 = `Season: ${overall.wins}W ${overall.losses}L (${overall.winrate}% WR)`;
+
+  if (session) {
+    const netPts =
+      session.net_pdl >= 0 ? `+${session.net_pdl}` : `${session.net_pdl}`;
+    const outputPart2 = `${solareTierName} (${rating} PTS) | Live: ${session.wins}W ${session.losses}L (${netPts} PTS)`;
+
+    return `${outputPart1} | ${outputPart2} | ${outputPart3}`;
+  }
+
+  return `${outputPart1} | ${outputPart3}`;
+}
+
 const solare = {
   VALID_REGIONS,
   getWinStreakBonus,
   createOrResetSession,
   getOverlayData,
+  getChatSummary,
 };
 
 export default solare;
