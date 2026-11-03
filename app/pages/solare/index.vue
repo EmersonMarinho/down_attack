@@ -458,7 +458,8 @@
                   type="number"
                   min="0"
                   max="9999"
-                  class="w-full bg-[#151413] border border-[#584938] focus:border-[#c5a059] rounded px-3 py-1.5 text-xs font-mono font-bold text-[#dfcaa2] focus:outline-none"
+                  placeholder="Enter your current in-game PTS (e.g., 1850)"
+                  class="w-full bg-[#151413] border border-[#584938] focus:border-[#c5a059] rounded px-3 py-1.5 text-xs font-mono font-bold text-[#dfcaa2] placeholder-stone-500 placeholder:font-sans placeholder:font-normal focus:outline-none"
                 />
                 <button
                   type="button"
@@ -714,6 +715,85 @@
               </div>
             </div>
 
+            <!-- Chatbot Command Setup (Nightbot / StreamElements) -->
+            <div class="space-y-1.5 pt-2 border-t border-[#362f27]">
+              <div class="flex items-center justify-between">
+                <label
+                  class="text-[11px] font-semibold uppercase tracking-wider text-stone-400"
+                >
+                  Twitch &amp; Kick Chat Command (!solare)
+                </label>
+                <div class="flex items-center space-x-1">
+                  <button
+                    type="button"
+                    class="px-2 py-0.5 text-[10px] font-mono rounded transition cursor-pointer"
+                    :class="
+                      selectedChatBot === 'nightbot'
+                        ? 'font-bold bg-[#382d21] text-[#dfcaa2] border border-[#826744]'
+                        : 'text-stone-400 bg-[#1a1817] border border-[#362f27] hover:border-[#584938]'
+                    "
+                    @click="selectedChatBot = 'nightbot'"
+                  >
+                    Nightbot
+                  </button>
+                  <button
+                    type="button"
+                    class="px-2 py-0.5 text-[10px] font-mono rounded transition cursor-pointer"
+                    :class="
+                      selectedChatBot === 'streamelements'
+                        ? 'font-bold bg-[#382d21] text-[#dfcaa2] border border-[#826744]'
+                        : 'text-stone-400 bg-[#1a1817] border border-[#362f27] hover:border-[#584938]'
+                    "
+                    @click="selectedChatBot = 'streamelements'"
+                  >
+                    StreamElements
+                  </button>
+                </div>
+              </div>
+              <div class="flex space-x-2">
+                <div class="relative flex-grow">
+                  <input
+                    :value="displayedChatCommand"
+                    readonly
+                    type="text"
+                    class="w-full bg-[#121110] border border-[#584938] rounded px-3 py-2 text-xs font-mono text-[#dfcaa2] focus:outline-none select-all"
+                    @copy.prevent="copyChatCommand"
+                  />
+                </div>
+                <button
+                  type="button"
+                  class="px-3.5 py-2 border rounded text-xs font-bold text-white transition flex items-center space-x-1.5 flex-shrink-0 cursor-pointer"
+                  :class="
+                    copiedChatCommand
+                      ? 'bg-emerald-800 border-emerald-500'
+                      : 'bg-[#2c241c] hover:bg-[#382f24] border-[#826744] hover:border-[#c5a059]'
+                  "
+                  @click="copyChatCommand"
+                >
+                  <svg
+                    class="w-4 h-4 text-[#c5a059]"
+                    fill="none"
+                    stroke="currentColor"
+                    viewBox="0 0 24 24"
+                  >
+                    <path
+                      d="M8 7v8a2 2 0 002 2h6M8 7V5a2 2 0 012-2h4.586a1 1 0 01.707.293l4.414 4.414a1 1 0 01.293.707V15a2 2 0 01-2 2h-2M8 7H6a2 2 0 00-2 2v10a2 2 0 002 2h8a2 2 0 002-2v-2"
+                      stroke-linecap="round"
+                      stroke-linejoin="round"
+                      stroke-width="2"
+                    />
+                  </svg>
+                  <span>{{ copiedChatCommand ? "COPIED!" : "Copy Cmd" }}</span>
+                </button>
+              </div>
+              <p class="text-[10px] text-stone-400">
+                Paste in your stream chat to add
+                <span class="font-mono text-stone-300">!solare</span> (or change
+                to <span class="font-mono text-stone-300">!pdl</span> /
+                <span class="font-mono text-stone-300">!rank</span>).
+              </p>
+            </div>
+
             <!-- Security Callout Note -->
             <div
               class="rounded bg-[#1a1714] border-l-2 border-l-[#826744] border-y border-r border-[#362f27] p-2.5 text-[11px] text-stone-400 leading-relaxed"
@@ -906,7 +986,7 @@
                   <span
                     class="text-xs font-mono px-2.5 py-1 rounded bg-amber-950/80 text-amber-300 border border-amber-600/60 font-bold uppercase tracking-wider"
                   >
-                    Server Delay (8–10 min)
+                    Server Delay (2–5 min)
                   </span>
                 </div>
                 <p
@@ -926,7 +1006,7 @@
                   </strong>
                   whether the last match recorded by the system is actually your
                   most recent game. Due to Black Desert's official server delay
-                  (8 to 10 minutes to publish match data), starting a session
+                  (2 to 5 minutes to publish match data), starting a session
                   before your previous match has been processed may cause that
                   earlier match to be counted in today's session.
                 </p>
@@ -976,7 +1056,7 @@ const searchStatus = ref("demo"); // 'demo' | 'loading' | 'found' | 'error'
 const searchErrorMessage = ref("");
 
 const sessionToken = ref("");
-const startingRatingInput = ref(2080);
+const startingRatingInput = ref(null);
 const isSavingSession = ref(false);
 const sessionButtonLabel = ref("START / RESET TODAY'S SESSION");
 const sessionFeedbackMessage = ref("");
@@ -984,6 +1064,8 @@ const sessionFeedbackIsError = ref(false);
 
 const isTokenMasked = ref(true);
 const copiedUrl = ref(false);
+const selectedChatBot = ref("nightbot");
+const copiedChatCommand = ref(false);
 const portraitImgError = ref(false);
 
 const previewRatingOverride = ref(null);
@@ -1089,7 +1171,14 @@ const activeEffectiveRating = computed(() => {
   ) {
     return Number(activePlayerData.value.rating);
   }
-  return Number(startingRatingInput.value || 0);
+  if (
+    startingRatingInput.value !== null &&
+    startingRatingInput.value !== "" &&
+    !Number.isNaN(Number(startingRatingInput.value))
+  ) {
+    return Number(startingRatingInput.value);
+  }
+  return 2080;
 });
 
 const previewCardData = computed(() => {
@@ -1181,6 +1270,54 @@ const displayedObsUrl = computed(() => {
   return `${origin}/solare/overlay?token=${masked}&layout=${selectedLayout.value}`;
 });
 
+function buildChatCommand(urlStr) {
+  if (selectedChatBot.value === "streamelements") {
+    return `!cmd add !solare \${customapi.${urlStr}}`;
+  }
+  return `!addcom !solare $(urlfetch ${urlStr})`;
+}
+
+const fullChatCommand = computed(() => {
+  const origin =
+    typeof window !== "undefined"
+      ? window.location.origin
+      : "https://down-attack.com";
+  if (sessionToken.value) {
+    return buildChatCommand(
+      `${origin}/api/v1/solare/chat?token=${encodeURIComponent(sessionToken.value)}`,
+    );
+  }
+  const targetNick = (
+    livePlayerData.value?.user_nickname ||
+    familyNameInput.value ||
+    "Okazaki"
+  ).trim();
+  const targetRegion = (
+    livePlayerData.value?.region ||
+    selectedRegion.value ||
+    "SA"
+  ).toUpperCase();
+  return buildChatCommand(
+    `${origin}/api/v1/solare/chat?nick=${encodeURIComponent(targetNick)}&region=${encodeURIComponent(targetRegion)}`,
+  );
+});
+
+const displayedChatCommand = computed(() => {
+  if (!sessionToken.value || !isTokenMasked.value) {
+    return fullChatCommand.value;
+  }
+  const origin =
+    typeof window !== "undefined"
+      ? window.location.origin
+      : "https://down-attack.com";
+  const rawToken = sessionToken.value;
+  const masked =
+    rawToken.length > 12
+      ? `${rawToken.slice(0, 6)}••••••••${rawToken.slice(-4)}`
+      : rawToken;
+  return buildChatCommand(`${origin}/api/v1/solare/chat?token=${masked}`);
+});
+
 function saveStateToStorage() {
   if (typeof window === "undefined") return;
   try {
@@ -1214,7 +1351,7 @@ function resetBaselineInput() {
   ) {
     startingRatingInput.value = Number(activePlayerData.value.rating);
   } else {
-    startingRatingInput.value = 2080;
+    startingRatingInput.value = null;
   }
   previewRatingOverride.value = null;
 }
@@ -1287,6 +1424,20 @@ async function handleStartOrResetSession() {
     return;
   }
 
+  const rawRating = startingRatingInput.value;
+  const hasExplicitRating =
+    rawRating !== null &&
+    rawRating !== undefined &&
+    String(rawRating).trim() !== "" &&
+    !Number.isNaN(Number(rawRating));
+
+  if (!hasExplicitRating && !sessionToken.value) {
+    sessionFeedbackIsError.value = true;
+    sessionFeedbackMessage.value =
+      "Please enter your current in-game Starting Rating (PTS) above before starting a session.";
+    return;
+  }
+
   isSavingSession.value = true;
   sessionButtonLabel.value = "RESETTING SESSION...";
   sessionFeedbackMessage.value = "";
@@ -1296,8 +1447,11 @@ async function handleStartOrResetSession() {
     const payload = {
       nick: targetNick,
       region: selectedRegion.value,
-      rating: Number(startingRatingInput.value || 0),
     };
+
+    if (hasExplicitRating) {
+      payload.rating = Number(rawRating);
+    }
 
     if (sessionToken.value) {
       payload.token = sessionToken.value;
@@ -1376,6 +1530,22 @@ async function copyObsUrl() {
     copiedUrl.value = true;
     setTimeout(() => {
       copiedUrl.value = false;
+    }, 2000);
+  } catch {
+    // Fallback ignored
+  }
+}
+
+async function copyChatCommand() {
+  if (typeof navigator === "undefined" || !navigator.clipboard) return;
+  try {
+    if (!sessionToken.value && searchStatus.value === "found") {
+      await handleStartOrResetSession();
+    }
+    await navigator.clipboard.writeText(fullChatCommand.value);
+    copiedChatCommand.value = true;
+    setTimeout(() => {
+      copiedChatCommand.value = false;
     }, 2000);
   } catch {
     // Fallback ignored
