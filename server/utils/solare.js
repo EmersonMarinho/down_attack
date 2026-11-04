@@ -1491,6 +1491,34 @@ async function getRanking({ region, season, classType, headers } = {}) {
 
   const playersResult = await database.query({
     text: `
+      WITH deduplicated_ranking AS (
+        SELECT DISTINCT ON (current_ranking)
+          user_no,
+          user_nickname,
+          current_ranking,
+          class_type,
+          skill_branch_type,
+          win_count,
+          lose_count,
+          draw_count,
+          updated_at,
+          last_seen_at
+        FROM
+          solare_players
+        WHERE
+          region = $1
+          AND current_ranking IS NOT NULL
+          AND current_ranking BETWEEN 1 AND 100
+          AND (
+            season = $2
+            OR ($2 = 9 AND season IS NULL)
+          )
+        ORDER BY
+          current_ranking ASC,
+          updated_at DESC,
+          last_seen_at DESC,
+          win_count DESC
+      )
       SELECT
         user_no,
         user_nickname,
@@ -1502,18 +1530,11 @@ async function getRanking({ region, season, classType, headers } = {}) {
         draw_count,
         updated_at
       FROM
-        solare_players
+        deduplicated_ranking
       WHERE
-        region = $1
-        AND (
-          season = $2
-          OR ($2 = 9 AND season IS NULL)
-        )
-        AND ($3::smallint IS NULL OR class_type = $3::smallint)
+        ($3::smallint IS NULL OR class_type = $3::smallint)
       ORDER BY
-        current_ranking ASC NULLS LAST,
-        win_count DESC,
-        updated_at DESC
+        current_ranking ASC
       LIMIT 100
       ;`,
     values: [targetRegion, targetSeason, validatedClassType],

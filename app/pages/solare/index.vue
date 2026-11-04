@@ -284,10 +284,35 @@ definePageMeta({
   },
 });
 
+const STORAGE_REGION_KEY = "solare_selected_region";
 const regions = ["SA", "NA", "EU", "KR", "JP", "RU", "TR", "TW"];
 const selectedRegion = ref("SA");
 const regionInitialized = ref(false);
 const activeSeason = ref(9);
+
+function saveSelectedRegion(reg) {
+  if (typeof window === "undefined") return;
+  try {
+    if (regions.includes(reg)) {
+      window.localStorage.setItem(STORAGE_REGION_KEY, reg);
+    }
+  } catch {
+    // Ignore storage errors
+  }
+}
+
+function loadSavedRegion() {
+  if (typeof window === "undefined") return null;
+  try {
+    const saved = window.localStorage.getItem(STORAGE_REGION_KEY);
+    if (saved && regions.includes(saved.toUpperCase())) {
+      return saved.toUpperCase();
+    }
+  } catch {
+    // Ignore storage errors
+  }
+  return null;
+}
 
 const searchInput = ref("");
 const selectedClassFilter = ref("");
@@ -349,6 +374,7 @@ async function fetchRanking() {
     if (body.region && regions.includes(body.region)) {
       selectedRegion.value = body.region;
       regionInitialized.value = true;
+      saveSelectedRegion(body.region);
     }
     if (body.season) {
       activeSeason.value = body.season;
@@ -364,6 +390,7 @@ async function fetchRanking() {
 function changeRegion(reg) {
   selectedRegion.value = reg;
   regionInitialized.value = true;
+  saveSelectedRegion(reg);
   fetchRanking();
 }
 
@@ -374,20 +401,32 @@ function handlePlayerSearch() {
 }
 
 function goToPlayer(nick) {
+  saveSelectedRegion(selectedRegion.value);
   router.push(
     `/solare/player/${selectedRegion.value.toLowerCase()}/${encodeURIComponent(nick)}`,
   );
 }
 
 onMounted(() => {
+  const savedRegion = loadSavedRegion();
+  if (savedRegion) {
+    selectedRegion.value = savedRegion;
+    regionInitialized.value = true;
+  }
+
   // Support direct ?nick=... query link by redirecting to dedicated player route
   if (route.query.nick) {
     const qNick = String(route.query.nick).trim();
-    const qReg = String(route.query.region || "SA")
+    const qReg = String(route.query.region || selectedRegion.value || "SA")
       .trim()
-      .toLowerCase();
+      .toUpperCase();
+    if (regions.includes(qReg)) {
+      saveSelectedRegion(qReg);
+    }
     if (qNick) {
-      router.replace(`/solare/player/${qReg}/${encodeURIComponent(qNick)}`);
+      router.replace(
+        `/solare/player/${qReg.toLowerCase()}/${encodeURIComponent(qNick)}`,
+      );
       return;
     }
   }

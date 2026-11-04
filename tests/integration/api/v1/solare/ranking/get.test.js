@@ -69,6 +69,32 @@ describe("GET /api/v1/solare/ranking", () => {
       });
 
       await orchestrator.createSolarePlayer({
+        region: "SA",
+        season: 9,
+        user_no: 1004,
+        user_nickname: "StaleRank90",
+        current_ranking: 90,
+        class_type: 1,
+        skill_branch_type: 1,
+        win_count: 101,
+        lose_count: 88,
+        draw_count: 0,
+      });
+
+      await orchestrator.createSolarePlayer({
+        region: "SA",
+        season: 9,
+        user_no: 1005,
+        user_nickname: "ActiveRank90",
+        current_ranking: 90,
+        class_type: 20,
+        skill_branch_type: 2,
+        win_count: 81,
+        lose_count: 65,
+        draw_count: 0,
+      });
+
+      await orchestrator.createSolarePlayer({
         region: "NA",
         season: 9,
         user_no: 2001,
@@ -81,7 +107,7 @@ describe("GET /api/v1/solare/ranking", () => {
         draw_count: 0,
       });
 
-      // 1. SA Leaderboard ordered by current_ranking ASC
+      // 1. SA Leaderboard ordered by current_ranking ASC (deduplicating stale rank #90)
       const saRes = await fetch(
         `${webserver.origin}/api/v1/solare/ranking?region=sa`,
       );
@@ -94,6 +120,7 @@ describe("GET /api/v1/solare/ranking", () => {
         "Okazaki",
         "Neri",
         "Shamsir",
+        "ActiveRank90",
       ]);
       expect(saBody.players[0]).toMatchObject({
         rank: 2,

@@ -1713,9 +1713,24 @@ async function loadMoreMatches() {
   }
 }
 
+function persistSelectedRegion(reg) {
+  if (typeof window === "undefined") return;
+  try {
+    const normalized = String(reg || "")
+      .trim()
+      .toUpperCase();
+    if (regions.includes(normalized)) {
+      window.localStorage.setItem("solare_selected_region", normalized);
+    }
+  } catch {
+    // Ignore storage errors
+  }
+}
+
 function submitSearch() {
   const trimmed = searchQuery.value.trim();
   if (!trimmed) return;
+  persistSelectedRegion(searchRegion.value);
   router.push(
     `/solare/player/${searchRegion.value.toLowerCase()}/${encodeURIComponent(trimmed)}`,
   );
@@ -1724,12 +1739,14 @@ function submitSearch() {
 watch([routeRegion, routeNick], ([newReg, newNick]) => {
   searchRegion.value = newReg;
   searchQuery.value = newNick;
+  persistSelectedRegion(newReg);
   selectedClassFilter.value = null;
   resultFilter.value = "all";
   loadInitialProfile();
 });
 
 onMounted(() => {
+  persistSelectedRegion(routeRegion.value);
   loadInitialProfile();
 });
 </script>
