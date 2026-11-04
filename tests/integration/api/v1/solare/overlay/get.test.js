@@ -202,6 +202,9 @@ describe("GET /api/v1/solare/overlay", () => {
           damage_done: 90000,
           damage_taken: 75000,
           recovery: 30000,
+          // Best score on the losing team of the seeded lobby -> ACE
+          performance_score: 106,
+          award: "ace",
           match_date: expect.any(String),
         },
         overall: {

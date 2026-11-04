@@ -10,6 +10,7 @@ import {
   getSkillBranch,
   getTierInfo,
 } from "~~/app/utils/solareTier.js";
+import { scoreMatchPlayers } from "~~/app/utils/solareMatchScore.js";
 
 const VALID_REGIONS = ["SA", "NA", "EU", "KR", "JP", "RU", "TR", "TW"];
 
@@ -76,6 +77,33 @@ async function getEnrichedMatchHistory(region, nick, userNo = null) {
   });
 
   return enrichMatchRows(result.rows);
+}
+
+// Scores the whole lobby of one match and returns the entry of `nickname`
+// ({ score, award } — both null when the lobby is incomplete).
+async function getMatchPlayerScore(region, recordNo, nickname) {
+  const lobbyResult = await database.query({
+    text: `
+      SELECT
+        user_nickname,
+        is_winner,
+        kill_count,
+        death_count,
+        cc_applied_count,
+        damage_done,
+        damage_taken,
+        recovery
+      FROM
+        solare_match_players
+      WHERE
+        region = $1
+        AND record_no = $2
+      ;`,
+    values: [region, recordNo],
+  });
+
+  const scored = scoreMatchPlayers(lobbyResult.rows);
+  return scored.find((p) => p.user_nickname === nickname) || null;
 }
 
 function validateRegion(region) {
@@ -637,6 +665,14 @@ async function getOverlayData({ nick, region, token } = {}) {
     };
   }
 
+  const latestMatchScore = hasMatches
+    ? await getMatchPlayerScore(
+        targetRegion,
+        latestRecordNo,
+        latestMatchRow.user_nickname,
+      )
+    : null;
+
   const latestMatch = hasMatches
     ? {
         record_no: latestRecordNo,
@@ -647,6 +683,8 @@ async function getOverlayData({ nick, region, token } = {}) {
         damage_done: Number(latestMatchRow.damage_done || 0),
         damage_taken: Number(latestMatchRow.damage_taken || 0),
         recovery: Number(latestMatchRow.recovery || 0),
+        performance_score: latestMatchScore?.score ?? null,
+        award: latestMatchScore?.award ?? null,
         match_date: latestMatchRow.match_date
           ? new Date(latestMatchRow.match_date).toISOString()
           : null,

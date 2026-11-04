@@ -230,6 +230,20 @@
                         {{ activeLatestMatch.is_winner ? "Victory" : "Defeat" }}
                       </span>
                       <span
+                        v-if="activeLatestMatch.award"
+                        class="px-1.5 py-0.5 rounded text-[10px] font-black uppercase border"
+                        :class="
+                          activeLatestMatch.award === 'mvp'
+                            ? 'bg-amber-950/60 border-amber-500/60 text-amber-300'
+                            : 'bg-violet-950/60 border-violet-500/60 text-violet-300'
+                        "
+                        :title="`Performance score: ${activeLatestMatch.performance_score} (100 = match average)`"
+                      >
+                        {{
+                          activeLatestMatch.award === "mvp" ? "★ MVP" : "ACE"
+                        }}
+                      </span>
+                      <span
                         v-if="latestMatchDelta !== null"
                         class="font-bold"
                         :class="
@@ -1091,6 +1105,8 @@ const demoOverlayData = {
     damage_done: 214000,
     damage_taken: 138000,
     recovery: 96000,
+    performance_score: 152,
+    award: "mvp",
     match_date: new Date(Date.now() - 12 * 60 * 1000).toISOString(),
   },
   overall: {
