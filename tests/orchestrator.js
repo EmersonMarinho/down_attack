@@ -135,6 +135,7 @@ async function createCombo(comboObject, user) {
 async function createSolarePlayer(playerObject = {}) {
   const defaultPlayer = {
     region: "SA",
+    season: 9,
     user_no: 49934,
     user_nickname: "Shxtey",
     current_ranking: 1,
@@ -155,11 +156,12 @@ async function createSolarePlayer(playerObject = {}) {
   const result = await database.query({
     text: `
       INSERT INTO solare_players (
-        region, user_no, user_nickname, current_ranking, class_type,
+        region, season, user_no, user_nickname, current_ranking, class_type,
         skill_branch_type, win_count, lose_count, draw_count,
         win_average, download_count, last_seen_at, updated_at
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NOW(), NOW())
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, NOW(), NOW())
       ON CONFLICT (region, user_no) DO UPDATE SET
+        season = EXCLUDED.season,
         user_nickname = EXCLUDED.user_nickname,
         current_ranking = EXCLUDED.current_ranking,
         class_type = EXCLUDED.class_type,
@@ -175,6 +177,7 @@ async function createSolarePlayer(playerObject = {}) {
     `,
     values: [
       p.region,
+      p.season,
       p.user_no,
       p.user_nickname,
       p.current_ranking,
@@ -193,6 +196,7 @@ async function createSolarePlayer(playerObject = {}) {
 
 async function createSolareMatch(matchObject = {}) {
   const region = matchObject.region || "SA";
+  const season = matchObject.season ?? 9;
   const recordNo = matchObject.record_no ?? 920906;
   const targetNick = matchObject.user_nickname || "Shxtey";
   const targetUserNo = matchObject.user_no ?? 49934;
@@ -209,10 +213,11 @@ async function createSolareMatch(matchObject = {}) {
 
   const defaultMatch = {
     region,
+    season,
     record_no: recordNo,
     play_time_seconds: 227,
     win_record: targetIsWinner ? [2, 2, 2] : [3, 3, 3],
-    repz_download_url: `https://replay.pearlcdn.com/sa/sa/solare_8_${recordNo}_4b0d351e.repz`,
+    repz_download_url: `https://replay.pearlcdn.com/sa/sa/solare_${season - 1}_${recordNo}_4b0d351e.repz`,
     match_date: new Date().toISOString(),
   };
 
@@ -317,9 +322,10 @@ async function createSolareMatch(matchObject = {}) {
   const matchRes = await database.query({
     text: `
       INSERT INTO solare_matches (
-        region, record_no, play_time_seconds, win_record, repz_download_url, match_date, crawled_at
-      ) VALUES ($1, $2, $3, $4, $5, $6, NOW())
+        region, season, record_no, play_time_seconds, win_record, repz_download_url, match_date, crawled_at
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())
       ON CONFLICT (region, record_no) DO UPDATE SET
+        season = EXCLUDED.season,
         play_time_seconds = EXCLUDED.play_time_seconds,
         win_record = EXCLUDED.win_record,
         repz_download_url = EXCLUDED.repz_download_url,
@@ -328,6 +334,7 @@ async function createSolareMatch(matchObject = {}) {
     `,
     values: [
       m.region,
+      m.season,
       m.record_no,
       m.play_time_seconds,
       m.win_record,

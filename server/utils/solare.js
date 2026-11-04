@@ -13,6 +13,137 @@ import {
 
 const VALID_REGIONS = ["SA", "NA", "EU", "KR", "JP", "RU", "TR", "TW"];
 
+const REGION_BY_COUNTRIES = {
+  KR: ["KR"],
+  JP: ["JP"],
+  TW: ["TW", "HK", "MO"],
+  TR: [
+    "TR",
+    "AE",
+    "EG",
+    "IL",
+    "QA",
+    "KW",
+    "BH",
+    "OM",
+    "JO",
+    "LB",
+    "MA",
+    "DZ",
+    "TN",
+    "IQ",
+    "SA",
+  ],
+  RU: ["RU", "BY", "KZ", "UA", "AM", "AZ", "GE", "UZ", "KG", "TJ", "TM", "MD"],
+  SA: [
+    "BR",
+    "AR",
+    "CL",
+    "PE",
+    "CO",
+    "UY",
+    "PY",
+    "BO",
+    "EC",
+    "VE",
+    "GY",
+    "SR",
+    "GF",
+  ],
+  NA: [
+    "US",
+    "CA",
+    "MX",
+    "AU",
+    "NZ",
+    "CR",
+    "PA",
+    "DO",
+    "PR",
+    "GT",
+    "SV",
+    "HN",
+    "NI",
+    "JM",
+    "TT",
+    "BS",
+    "BB",
+  ],
+  EU: [
+    "DE",
+    "FR",
+    "GB",
+    "UK",
+    "ES",
+    "PT",
+    "IT",
+    "NL",
+    "PL",
+    "SE",
+    "NO",
+    "FI",
+    "DK",
+    "AT",
+    "BE",
+    "CH",
+    "IE",
+    "CZ",
+    "GR",
+    "HU",
+    "RO",
+    "BG",
+    "HR",
+    "SK",
+    "SI",
+    "LT",
+    "LV",
+    "EE",
+    "LU",
+    "MT",
+    "CY",
+    "IS",
+    "RS",
+    "BA",
+    "MK",
+    "AL",
+    "ME",
+    "ZA",
+  ],
+};
+
+const COUNTRY_TO_REGION_MAP = Object.entries(REGION_BY_COUNTRIES).reduce(
+  (acc, [regionCode, countries]) => {
+    for (const country of countries) {
+      acc[country] = regionCode;
+    }
+    return acc;
+  },
+  {},
+);
+
+function inferRegionFromCountry(countryCode) {
+  if (!countryCode || typeof countryCode !== "string") {
+    return "SA";
+  }
+
+  const normalizedCountry = countryCode.trim().toUpperCase();
+  return COUNTRY_TO_REGION_MAP[normalizedCountry] || "SA";
+}
+
+function inferRegionFromHeaders(headers = {}) {
+  if (!headers || typeof headers !== "object") {
+    return "SA";
+  }
+
+  const countryCode =
+    headers["x-vercel-ip-country"] ||
+    headers["cf-ipcountry"] ||
+    headers["x-country-code"] ||
+    null;
+
+  return inferRegionFromCountry(countryCode);
+}
+
 function getWinStreakBonus(consecutiveWins) {
   if (consecutiveWins >= 8) {
     return 8;
@@ -78,12 +209,20 @@ async function getEnrichedMatchHistory(region, nick, userNo = null) {
   return enrichMatchRows(result.rows);
 }
 
-function validateRegion(region) {
-  if (region === undefined || region === null) {
-    return "SA";
+function isEmptyParam(value) {
+  return (
+    value === undefined ||
+    value === null ||
+    (typeof value === "string" && value.trim() === "")
+  );
+}
+
+function validateRegion(region, fallbackRegion = "SA") {
+  if (isEmptyParam(region)) {
+    return VALID_REGIONS.includes(fallbackRegion) ? fallbackRegion : "SA";
   }
 
-  if (typeof region !== "string" || region.trim().length === 0) {
+  if (typeof region !== "string") {
     throw new ValidationError({
       message: `Invalid region: '${region}'.`,
       action: "Valid regions are: SA, NA, EU, KR, JP, RU, TR, TW.",
@@ -100,6 +239,97 @@ function validateRegion(region) {
   }
 
   return normalizedRegion;
+}
+
+function validateSeason(season) {
+  if (isEmptyParam(season)) {
+    return null;
+  }
+
+  const parsed = Number(season);
+
+  if (
+    typeof season === "boolean" ||
+    Array.isArray(season) ||
+    !Number.isInteger(parsed) ||
+    parsed < 1 ||
+    parsed > 100
+  ) {
+    throw new ValidationError({
+      message: '"season" must be an integer between 1 and 100.',
+      action: "Please provide a valid Solare season number.",
+    });
+  }
+
+  return parsed;
+}
+
+function validateClassType(classType) {
+  if (isEmptyParam(classType)) {
+    return null;
+  }
+
+  const parsed = Number(classType);
+
+  if (
+    typeof classType === "boolean" ||
+    Array.isArray(classType) ||
+    !Number.isInteger(parsed) ||
+    parsed < 0 ||
+    parsed > 35
+  ) {
+    throw new ValidationError({
+      message: '"class_type" must be an integer between 0 and 35.',
+      action: "Please provide a valid class_type.",
+    });
+  }
+
+  return parsed;
+}
+
+function validatePage(page) {
+  if (isEmptyParam(page)) {
+    return 1;
+  }
+
+  const parsed = Number(page);
+
+  if (
+    typeof page === "boolean" ||
+    Array.isArray(page) ||
+    !Number.isInteger(parsed) ||
+    parsed < 1
+  ) {
+    throw new ValidationError({
+      message: '"page" must be an integer greater than or equal to 1.',
+      action: "Please provide a valid page number.",
+    });
+  }
+
+  return parsed;
+}
+
+function validateLimit(limit) {
+  if (isEmptyParam(limit)) {
+    return 20;
+  }
+
+  const parsed = Number(limit);
+
+  if (
+    typeof limit === "boolean" ||
+    Array.isArray(limit) ||
+    !Number.isInteger(parsed) ||
+    parsed < 1 ||
+    parsed > 50
+  ) {
+    throw new ValidationError({
+      message: '"limit" must be an integer between 1 and 50.',
+      action: "Please provide a limit between 1 and 50.",
+    });
+  }
+
+  return parsed;
 }
 
 function validateNick(nick) {
@@ -711,12 +941,627 @@ async function getChatSummary({ nick, region, token } = {}) {
   return `${outputPart1} | ${outputPart3}`;
 }
 
+function normalizeWinRecord(winRecord, playerTeam) {
+  if (!Array.isArray(winRecord)) {
+    return null;
+  }
+
+  const normalized = winRecord.map((r) => Number(r));
+
+  if (Number(playerTeam) === 1) {
+    return normalized.map((r) => (r === 2 ? 3 : r === 3 ? 2 : r));
+  }
+
+  return normalized;
+}
+
+function formatMatchParticipant(row) {
+  return {
+    user_nickname: row.user_nickname,
+    user_no:
+      row.user_no !== null && row.user_no !== undefined
+        ? String(row.user_no)
+        : null,
+    class_type: Number(row.class_type),
+    skill_branch_type: Number(row.skill_branch_type),
+    kill_count: Number(row.kill_count || 0),
+    death_count: Number(row.death_count || 0),
+    cc_applied_count: Number(row.cc_applied_count || 0),
+    damage_done: Number(row.damage_done || 0),
+    damage_taken: Number(row.damage_taken || 0),
+    recovery: Number(row.recovery || 0),
+    is_winner: Boolean(row.is_winner),
+    vary_rank_rating:
+      row.vary_rank_rating !== null && row.vary_rank_rating !== undefined
+        ? Number(row.vary_rank_rating)
+        : null,
+  };
+}
+
+async function getPlayerProfile({
+  nick,
+  region,
+  countryCode,
+  season,
+  class_type: classTypeFilter,
+  page,
+  limit,
+} = {}) {
+  const targetNick = validateNick(nick);
+  const fallbackRegion = inferRegionFromCountry(countryCode);
+  const targetRegion = validateRegion(region, fallbackRegion);
+  const requestedSeason = validateSeason(season);
+  const validatedClassType = validateClassType(classTypeFilter);
+  const currentPage = validatePage(page);
+  const pageSize = validateLimit(limit);
+
+  const playerResult = await database.query({
+    text: `
+      SELECT
+        *
+      FROM
+        solare_players
+      WHERE
+        region = $1
+        AND LOWER(user_nickname) = LOWER($2)
+      ORDER BY
+        CASE WHEN $3::smallint IS NOT NULL AND season = $3::smallint THEN 0 ELSE 1 END,
+        season DESC NULLS LAST,
+        updated_at DESC
+      LIMIT 1
+      ;`,
+    values: [targetRegion, targetNick, requestedSeason],
+  });
+
+  let playerRow = playerResult.rows[0] || null;
+  let resolvedUserNo = playerRow?.user_no || null;
+
+  if (!resolvedUserNo) {
+    const identityResult = await database.query({
+      text: `
+        SELECT
+          user_no,
+          user_nickname
+        FROM
+          solare_match_players
+        WHERE
+          region = $1
+          AND LOWER(user_nickname) = LOWER($2)
+        ORDER BY
+          CASE WHEN user_no IS NOT NULL THEN 0 ELSE 1 END,
+          record_no DESC
+        LIMIT 1
+        ;`,
+      values: [targetRegion, targetNick],
+    });
+
+    if (!playerRow && identityResult.rowCount === 0) {
+      throw new NotFoundError({
+        message: `Player '${targetNick}' was not found in region '${targetRegion}'.`,
+        action: "Check if the Family Name and region are spelled correctly.",
+      });
+    }
+
+    resolvedUserNo = identityResult.rows[0]?.user_no || null;
+
+    if (!playerRow && resolvedUserNo) {
+      const playerByUserNoResult = await database.query({
+        text: `
+          SELECT
+            *
+          FROM
+            solare_players
+          WHERE
+            region = $1
+            AND user_no = $2::bigint
+          ORDER BY
+            CASE WHEN $3::smallint IS NOT NULL AND season = $3::smallint THEN 0 ELSE 1 END,
+            season DESC NULLS LAST,
+            updated_at DESC
+          LIMIT 1
+          ;`,
+        values: [targetRegion, resolvedUserNo, requestedSeason],
+      });
+
+      playerRow = playerByUserNoResult.rows[0] || null;
+    }
+  }
+
+  let targetSeason = requestedSeason;
+  if (targetSeason === null) {
+    if (playerRow?.season) {
+      targetSeason = Number(playerRow.season);
+    } else {
+      const seasonResult = await database.query({
+        text: `
+          SELECT
+            MAX(m.season)::smallint AS latest_season
+          FROM
+            solare_match_players mp
+          INNER JOIN
+            solare_matches m
+            ON m.region = mp.region AND m.record_no = mp.record_no
+          WHERE
+            mp.region = $1
+            AND (
+              ($3::bigint IS NOT NULL AND mp.user_no = $3::bigint)
+              OR (($3::bigint IS NULL OR mp.user_no IS NULL) AND LOWER(mp.user_nickname) = LOWER($2))
+            )
+          ;`,
+        values: [targetRegion, targetNick, resolvedUserNo],
+      });
+
+      targetSeason = seasonResult.rows[0]?.latest_season
+        ? Number(seasonResult.rows[0].latest_season)
+        : 9;
+    }
+  }
+
+  const seasonMatchesResult = await database.query({
+    text: `
+      SELECT
+        mp.id,
+        mp.record_no,
+        mp.team,
+        mp.user_nickname,
+        mp.user_no,
+        mp.class_type,
+        mp.skill_branch_type,
+        mp.is_winner,
+        mp.vary_rank_rating,
+        mp.kill_count,
+        mp.death_count,
+        mp.cc_applied_count,
+        mp.damage_done,
+        mp.damage_taken,
+        mp.recovery,
+        m.season,
+        m.play_time_seconds,
+        m.win_record,
+        m.repz_download_url,
+        COALESCE(m.match_date, m.crawled_at, mp.created_at) AS match_date
+      FROM
+        solare_match_players mp
+      INNER JOIN
+        solare_matches m
+        ON m.region = mp.region AND m.record_no = mp.record_no
+      WHERE
+        mp.region = $1
+        AND (
+          m.season = $4
+          OR ($4 = 9 AND m.season IS NULL)
+        )
+        AND (
+          ($3::bigint IS NOT NULL AND mp.user_no = $3::bigint)
+          OR (($3::bigint IS NULL OR mp.user_no IS NULL) AND LOWER(mp.user_nickname) = LOWER($2))
+        )
+      ORDER BY
+        mp.record_no DESC
+      ;`,
+    values: [targetRegion, targetNick, resolvedUserNo, targetSeason],
+  });
+
+  const seasonMatchRows = seasonMatchesResult.rows;
+  const totalSeasonMatches = seasonMatchRows.length;
+  const hasSeasonMatches = totalSeasonMatches > 0;
+  const latestMatchRow = hasSeasonMatches ? seasonMatchRows[0] : null;
+
+  let matchWins = 0;
+  let matchLosses = 0;
+  let sumKills = 0;
+  let sumDeaths = 0;
+  let sumCc = 0;
+  let sumDamageDone = 0;
+  let sumDamageTaken = 0;
+  let sumRecovery = 0;
+  let latestUserNo = null;
+  let bestWinStreak = 0;
+  let runningWinStreak = 0;
+
+  for (let i = totalSeasonMatches - 1; i >= 0; i -= 1) {
+    if (seasonMatchRows[i].is_winner === true) {
+      runningWinStreak += 1;
+      if (runningWinStreak > bestWinStreak) {
+        bestWinStreak = runningWinStreak;
+      }
+    } else {
+      runningWinStreak = 0;
+    }
+  }
+  const currentWinStreak = runningWinStreak;
+
+  const recentPdlDeltas = seasonMatchRows
+    .slice(0, 20)
+    .reverse()
+    .map((r) =>
+      r.vary_rank_rating !== null && r.vary_rank_rating !== undefined
+        ? Number(r.vary_rank_rating)
+        : 0,
+    );
+
+  const classMap = new Map();
+
+  for (let i = 0; i < totalSeasonMatches; i += 1) {
+    const row = seasonMatchRows[i];
+    if (
+      latestUserNo === null &&
+      row.user_no !== null &&
+      row.user_no !== undefined
+    ) {
+      latestUserNo = row.user_no;
+    }
+
+    const isWin = row.is_winner === true;
+    const isLoss = row.is_winner === false;
+    const kills = Number(row.kill_count || 0);
+    const deaths = Number(row.death_count || 0);
+    const cc = Number(row.cc_applied_count || 0);
+    const dmgDone = Number(row.damage_done || 0);
+    const dmgTaken = Number(row.damage_taken || 0);
+    const heal = Number(row.recovery || 0);
+
+    if (isWin) matchWins += 1;
+    else if (isLoss) matchLosses += 1;
+
+    sumKills += kills;
+    sumDeaths += deaths;
+    sumCc += cc;
+    sumDamageDone += dmgDone;
+    sumDamageTaken += dmgTaken;
+    sumRecovery += heal;
+
+    const cType = Number(row.class_type);
+    const sBranch = Number(row.skill_branch_type);
+    const classKey = `${cType}:${sBranch}`;
+
+    if (!classMap.has(classKey)) {
+      classMap.set(classKey, {
+        class_type: cType,
+        skill_branch_type: sBranch,
+        wins: 0,
+        losses: 0,
+        draws: 0,
+        total_games: 0,
+        sumKills: 0,
+        sumDeaths: 0,
+        sumCc: 0,
+        sumDamageDone: 0,
+        sumDamageTaken: 0,
+        sumRecovery: 0,
+      });
+    }
+
+    const entry = classMap.get(classKey);
+    if (isWin) entry.wins += 1;
+    else if (isLoss) entry.losses += 1;
+    entry.total_games += 1;
+    entry.sumKills += kills;
+    entry.sumDeaths += deaths;
+    entry.sumCc += cc;
+    entry.sumDamageDone += dmgDone;
+    entry.sumDamageTaken += dmgTaken;
+    entry.sumRecovery += heal;
+  }
+
+  const classes = Array.from(classMap.values())
+    .sort(
+      (a, b) =>
+        b.total_games - a.total_games ||
+        b.wins - a.wins ||
+        a.class_type - b.class_type,
+    )
+    .map((c) => ({
+      class_type: c.class_type,
+      skill_branch_type: c.skill_branch_type,
+      wins: c.wins,
+      losses: c.losses,
+      draws: c.draws,
+      total_games: c.total_games,
+      winrate:
+        c.total_games > 0
+          ? Number(((c.wins / c.total_games) * 100).toFixed(1))
+          : 0,
+      averages: {
+        kills:
+          c.total_games > 0
+            ? Number((c.sumKills / c.total_games).toFixed(1))
+            : 0,
+        deaths:
+          c.total_games > 0
+            ? Number((c.sumDeaths / c.total_games).toFixed(1))
+            : 0,
+        cc:
+          c.total_games > 0 ? Number((c.sumCc / c.total_games).toFixed(1)) : 0,
+        damage_done:
+          c.total_games > 0 ? Math.round(c.sumDamageDone / c.total_games) : 0,
+        damage_taken:
+          c.total_games > 0 ? Math.round(c.sumDamageTaken / c.total_games) : 0,
+        recovery:
+          c.total_games > 0 ? Math.round(c.sumRecovery / c.total_games) : 0,
+      },
+    }));
+
+  const isPlayerRowForTargetSeason =
+    playerRow &&
+    (Number(playerRow.season) === targetSeason ||
+      (targetSeason === 9 &&
+        (playerRow.season === null || playerRow.season === undefined)));
+
+  const overallWins = isPlayerRowForTargetSeason
+    ? Number(playerRow.win_count)
+    : matchWins;
+  const overallLosses = isPlayerRowForTargetSeason
+    ? Number(playerRow.lose_count)
+    : matchLosses;
+  const overallDraws = isPlayerRowForTargetSeason
+    ? Number(playerRow.draw_count)
+    : 0;
+  const overallTotalGames = overallWins + overallLosses + overallDraws;
+  const overallWinrate =
+    overallTotalGames > 0
+      ? Number(((overallWins / overallTotalGames) * 100).toFixed(1))
+      : 0;
+
+  const canonicalNick =
+    playerRow?.user_nickname || latestMatchRow?.user_nickname || targetNick;
+  const canonicalUserNo =
+    playerRow?.user_no || latestUserNo || resolvedUserNo || null;
+  const primaryClassType =
+    (isPlayerRowForTargetSeason ? playerRow.class_type : null) ??
+    classes[0]?.class_type ??
+    playerRow?.class_type ??
+    null;
+  const primarySkillBranchType =
+    (isPlayerRowForTargetSeason ? playerRow.skill_branch_type : null) ??
+    classes[0]?.skill_branch_type ??
+    playerRow?.skill_branch_type ??
+    null;
+
+  const filteredMatchRows =
+    validatedClassType !== null
+      ? seasonMatchRows.filter(
+          (r) => Number(r.class_type) === validatedClassType,
+        )
+      : seasonMatchRows;
+
+  const totalFilteredMatches = filteredMatchRows.length;
+  const totalPages =
+    totalFilteredMatches > 0 ? Math.ceil(totalFilteredMatches / pageSize) : 0;
+  const startIndex = (currentPage - 1) * pageSize;
+  const pageMatchRows = filteredMatchRows.slice(
+    startIndex,
+    startIndex + pageSize,
+  );
+
+  let matches = [];
+
+  if (pageMatchRows.length > 0) {
+    const pageRecordNos = pageMatchRows.map((r) => Number(r.record_no));
+
+    const participantsResult = await database.query({
+      text: `
+        SELECT
+          mp.id,
+          mp.record_no,
+          mp.team,
+          mp.user_nickname,
+          mp.user_no,
+          mp.class_type,
+          mp.skill_branch_type,
+          mp.kill_count,
+          mp.death_count,
+          mp.cc_applied_count,
+          mp.damage_done,
+          mp.damage_taken,
+          mp.recovery,
+          mp.is_winner,
+          mp.vary_rank_rating
+        FROM
+          solare_match_players mp
+        WHERE
+          mp.region = $1
+          AND mp.record_no = ANY($2::bigint[])
+        ORDER BY
+          mp.record_no DESC,
+          mp.id ASC
+        ;`,
+      values: [targetRegion, pageRecordNos],
+    });
+
+    const participantsByRecordNo = new Map();
+    for (const pRow of participantsResult.rows) {
+      const recNo = Number(pRow.record_no);
+      if (!participantsByRecordNo.has(recNo)) {
+        participantsByRecordNo.set(recNo, []);
+      }
+      participantsByRecordNo.get(recNo).push(pRow);
+    }
+
+    matches = pageMatchRows.map((myRow) => {
+      const recNo = Number(myRow.record_no);
+      const myTeam = Number(myRow.team);
+      const allParticipants = participantsByRecordNo.get(recNo) || [];
+
+      const allies = allParticipants
+        .filter((p) => Number(p.team) === myTeam)
+        .map(formatMatchParticipant);
+      const enemies = allParticipants
+        .filter((p) => Number(p.team) !== myTeam)
+        .map(formatMatchParticipant);
+
+      return {
+        record_no: recNo,
+        season: Number(myRow.season || targetSeason),
+        match_date: myRow.match_date
+          ? new Date(myRow.match_date).toISOString()
+          : null,
+        play_time_seconds: Number(myRow.play_time_seconds || 0),
+        repz_download_url: myRow.repz_download_url || null,
+        is_winner: Boolean(myRow.is_winner),
+        vary_rank_rating:
+          myRow.vary_rank_rating !== null &&
+          myRow.vary_rank_rating !== undefined
+            ? Number(myRow.vary_rank_rating)
+            : null,
+        win_record: normalizeWinRecord(myRow.win_record, myTeam),
+        allies,
+        enemies,
+      };
+    });
+  }
+
+  return {
+    region: targetRegion,
+    season: targetSeason,
+    user_nickname: canonicalNick,
+    user_no: canonicalUserNo ? String(canonicalUserNo) : null,
+    current_ranking:
+      isPlayerRowForTargetSeason && playerRow.current_ranking !== null
+        ? Number(playerRow.current_ranking)
+        : null,
+    class_type: primaryClassType !== null ? Number(primaryClassType) : null,
+    skill_branch_type:
+      primarySkillBranchType !== null ? Number(primarySkillBranchType) : null,
+    overall: {
+      wins: overallWins,
+      losses: overallLosses,
+      draws: overallDraws,
+      total_games: overallTotalGames,
+      winrate: overallWinrate,
+      best_win_streak: bestWinStreak,
+      current_win_streak: currentWinStreak,
+    },
+    recent_pdl_deltas: recentPdlDeltas,
+    averages: {
+      kills: hasSeasonMatches
+        ? Number((sumKills / totalSeasonMatches).toFixed(1))
+        : 0,
+      deaths: hasSeasonMatches
+        ? Number((sumDeaths / totalSeasonMatches).toFixed(1))
+        : 0,
+      cc: hasSeasonMatches
+        ? Number((sumCc / totalSeasonMatches).toFixed(1))
+        : 0,
+      damage_done: hasSeasonMatches
+        ? Math.round(sumDamageDone / totalSeasonMatches)
+        : 0,
+      damage_taken: hasSeasonMatches
+        ? Math.round(sumDamageTaken / totalSeasonMatches)
+        : 0,
+      recovery: hasSeasonMatches
+        ? Math.round(sumRecovery / totalSeasonMatches)
+        : 0,
+    },
+    classes,
+    pagination: {
+      page: currentPage,
+      limit: pageSize,
+      total_matches: totalFilteredMatches,
+      total_pages: totalPages,
+      has_more: currentPage < totalPages,
+    },
+    matches,
+  };
+}
+
+async function getRanking({ region, season, classType, headers } = {}) {
+  const inferredRegion = inferRegionFromHeaders(headers);
+  const targetRegion = validateRegion(region, inferredRegion);
+  const requestedSeason = validateSeason(season);
+  const validatedClassType = validateClassType(classType);
+
+  let targetSeason = requestedSeason;
+  if (targetSeason === null) {
+    const seasonResult = await database.query({
+      text: `
+        SELECT
+          MAX(season)::smallint AS latest_season
+        FROM
+          solare_players
+        WHERE
+          region = $1
+        ;`,
+      values: [targetRegion],
+    });
+
+    targetSeason = seasonResult.rows[0]?.latest_season
+      ? Number(seasonResult.rows[0].latest_season)
+      : 9;
+  }
+
+  const playersResult = await database.query({
+    text: `
+      SELECT
+        user_no,
+        user_nickname,
+        current_ranking,
+        class_type,
+        skill_branch_type,
+        win_count,
+        lose_count,
+        draw_count,
+        updated_at
+      FROM
+        solare_players
+      WHERE
+        region = $1
+        AND (
+          season = $2
+          OR ($2 = 9 AND season IS NULL)
+        )
+        AND ($3::smallint IS NULL OR class_type = $3::smallint)
+      ORDER BY
+        current_ranking ASC NULLS LAST,
+        win_count DESC,
+        updated_at DESC
+      LIMIT 100
+      ;`,
+    values: [targetRegion, targetSeason, validatedClassType],
+  });
+
+  const players = playersResult.rows.map((p, index) => {
+    const wins = Number(p.win_count || 0);
+    const losses = Number(p.lose_count || 0);
+    const draws = Number(p.draw_count || 0);
+    const totalGames = wins + losses + draws;
+    const winrate =
+      totalGames > 0 ? Number(((wins / totalGames) * 100).toFixed(1)) : 0;
+
+    return {
+      rank:
+        p.current_ranking !== null && p.current_ranking !== undefined
+          ? Number(p.current_ranking)
+          : index + 1,
+      user_no: p.user_no ? String(p.user_no) : null,
+      user_nickname: p.user_nickname,
+      class_type: Number(p.class_type),
+      skill_branch_type: Number(p.skill_branch_type),
+      wins,
+      losses,
+      draws,
+      total_games: totalGames,
+      winrate,
+      updated_at: p.updated_at ? new Date(p.updated_at).toISOString() : null,
+    };
+  });
+
+  return {
+    region: targetRegion,
+    season: targetSeason,
+    players,
+  };
+}
+
 const solare = {
   VALID_REGIONS,
+  inferRegionFromCountry,
+  inferRegionFromHeaders,
   getWinStreakBonus,
   createOrResetSession,
   getOverlayData,
   getChatSummary,
+  getPlayerProfile,
+  getRanking,
 };
 
 export default solare;
