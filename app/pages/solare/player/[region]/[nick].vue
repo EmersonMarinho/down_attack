@@ -1146,7 +1146,7 @@ useSeoMeta({
 definePageMeta({
   header: {
     name: "Arena of Solare",
-    icon: "/icons/overlay.png",
+    icon: "/images/solare/solare-icon-game@4x.png",
   },
 });
 

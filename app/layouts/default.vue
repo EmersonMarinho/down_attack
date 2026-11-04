@@ -124,8 +124,8 @@
                   <span
                     class="w-4 h-4 bg-[#848895] group-hover:bg-white transition-colors duration-150 shrink-0 inline-block"
                     :style="{
-                      mask: `url(/icons/overlay.png) no-repeat center / contain`,
-                      WebkitMask: `url(/icons/overlay.png) no-repeat center / contain`,
+                      mask: `url(/images/solare/solare-icon-game@4x.png) no-repeat center / contain`,
+                      WebkitMask: `url(/images/solare/solare-icon-game@4x.png) no-repeat center / contain`,
                     }"
                   />
                   <span>Arena of Solare Search</span>
@@ -322,8 +322,14 @@ const tabs = [
   {
     id: "solare",
     name: "Arena of Solare",
-    icon: "/icons/overlay.png",
+    icon: "/images/solare/solare-icon-game@4x.png",
     path: "/solare",
+  },
+  {
+    id: "solare-overlay",
+    name: "Solare Overlay",
+    icon: "/icons/overlay.png",
+    path: "/solare/overlay",
   },
   {
     id: "discord",
@@ -343,6 +349,9 @@ const tabs = [
 const activeTab = computed(() => {
   if (route.path.startsWith("/calculator")) {
     return "calculator";
+  }
+  if (route.path.startsWith("/solare/overlay")) {
+    return "solare-overlay";
   }
   if (route.path.startsWith("/solare")) {
     return "solare";
