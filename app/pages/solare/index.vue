@@ -204,6 +204,13 @@
                       <span class="text-[13px] text-[#ece7df]">
                         {{ p.className }}
                       </span>
+                      <span
+                        v-if="p.class_ranking"
+                        class="font-mono text-[10px] font-semibold px-1.5 py-0.5 rounded bg-[#2a2316] text-[#d4af6a] border border-[#5a4a2c]"
+                        :title="`#${p.class_ranking} ${p.className} in ${selectedRegion}`"
+                      >
+                        #{{ p.class_ranking }}
+                      </span>
                       <span class="text-[#4a4b52]">•</span>
                       <span class="text-xs text-[#d4af6a]">
                         {{ p.branchName }}

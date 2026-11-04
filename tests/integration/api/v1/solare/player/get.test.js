@@ -436,6 +436,7 @@ describe("GET /api/v1/solare/player", () => {
       expect(shamsirBody.user_nickname).toBe("Shamsir");
       expect(shamsirBody.user_no).toBe("369181");
       expect(shamsirBody.current_ranking).toBe(23);
+      expect(shamsirBody.class_ranking).toBe(1);
       expect(shamsirBody.overall).toEqual({
         wins: 82,
         losses: 50,

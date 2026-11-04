@@ -124,6 +124,7 @@ describe("GET /api/v1/solare/ranking", () => {
       ]);
       expect(saBody.players[0]).toMatchObject({
         rank: 2,
+        class_ranking: 1,
         user_nickname: "Okazaki",
         class_type: 20,
         skill_branch_type: 2,
@@ -132,6 +133,7 @@ describe("GET /api/v1/solare/ranking", () => {
         total_games: 176,
         winrate: 61.9,
       });
+      expect(saBody.players.map((p) => p.class_ranking)).toEqual([1, 1, 2, 3]);
 
       // 2. Filter by class_type=8 (Sorceress)
       const sorcRes = await fetch(

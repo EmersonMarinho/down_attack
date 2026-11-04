@@ -105,8 +105,12 @@
                       : `UNRANKED ${profile.region}`
                   }}
                 </span>
+                <span v-if="profile.class_ranking" class="solare-top-tag">
+                  TOP #{{ profile.class_ranking }}
+                  {{ primaryClassName.toUpperCase() }}
+                </span>
                 <span
-                  v-if="
+                  v-else-if="
                     profile.current_ranking && profile.current_ranking <= 100
                   "
                   class="solare-top-tag"
@@ -187,6 +191,12 @@
                     ? `#${profile.current_ranking} ${profile.region}`
                     : `Unranked ${profile.region}`
                 }}
+              </span>
+            </div>
+            <div v-if="profile.class_ranking" class="solare-header-stat-item">
+              <span class="solare-header-stat-label">CLASS RANK</span>
+              <span class="solare-header-stat-value font-mono text-[#d4af6a]">
+                #{{ profile.class_ranking }} {{ primaryClassName }}
               </span>
             </div>
             <div class="solare-header-stat-item">

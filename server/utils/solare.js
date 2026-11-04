@@ -1410,15 +1410,75 @@ async function getPlayerProfile({
     });
   }
 
+  let activeCurrentRanking = null;
+  let activeClassRanking = null;
+
+  if (isPlayerRowForTargetSeason && playerRow.current_ranking !== null) {
+    const rankingPositionResult = await database.query({
+      text: `
+        WITH deduplicated_ranking AS (
+          SELECT DISTINCT ON (current_ranking)
+            user_no,
+            user_nickname,
+            current_ranking,
+            class_type
+          FROM
+            solare_players
+          WHERE
+            region = $1
+            AND current_ranking IS NOT NULL
+            AND current_ranking >= 1
+            AND (
+              season = $2
+              OR ($2 = 9 AND season IS NULL)
+            )
+          ORDER BY
+            current_ranking ASC,
+            updated_at DESC,
+            last_seen_at DESC,
+            win_count DESC
+        ),
+        ranked_with_class AS (
+          SELECT
+            user_no,
+            user_nickname,
+            current_ranking,
+            class_type,
+            ROW_NUMBER() OVER (
+              PARTITION BY class_type
+              ORDER BY current_ranking ASC
+            )::int AS class_ranking
+          FROM
+            deduplicated_ranking
+        )
+        SELECT
+          current_ranking,
+          class_ranking
+        FROM
+          ranked_with_class
+        WHERE
+          ($3::bigint IS NOT NULL AND user_no = $3::bigint)
+          OR LOWER(user_nickname) = LOWER($4)
+        LIMIT 1
+        ;`,
+      values: [targetRegion, targetSeason, canonicalUserNo, canonicalNick],
+    });
+
+    if (rankingPositionResult.rowCount > 0) {
+      activeCurrentRanking = Number(
+        rankingPositionResult.rows[0].current_ranking,
+      );
+      activeClassRanking = Number(rankingPositionResult.rows[0].class_ranking);
+    }
+  }
+
   return {
     region: targetRegion,
     season: targetSeason,
     user_nickname: canonicalNick,
     user_no: canonicalUserNo ? String(canonicalUserNo) : null,
-    current_ranking:
-      isPlayerRowForTargetSeason && playerRow.current_ranking !== null
-        ? Number(playerRow.current_ranking)
-        : null,
+    current_ranking: activeCurrentRanking,
+    class_ranking: activeClassRanking,
     class_type: primaryClassType !== null ? Number(primaryClassType) : null,
     skill_branch_type:
       primarySkillBranchType !== null ? Number(primarySkillBranchType) : null,
@@ -1508,7 +1568,7 @@ async function getRanking({ region, season, classType, headers } = {}) {
         WHERE
           region = $1
           AND current_ranking IS NOT NULL
-          AND current_ranking BETWEEN 1 AND 100
+          AND current_ranking >= 1
           AND (
             season = $2
             OR ($2 = 9 AND season IS NULL)
@@ -1518,11 +1578,30 @@ async function getRanking({ region, season, classType, headers } = {}) {
           updated_at DESC,
           last_seen_at DESC,
           win_count DESC
+      ),
+      ranked_with_class AS (
+        SELECT
+          user_no,
+          user_nickname,
+          current_ranking,
+          ROW_NUMBER() OVER (
+            PARTITION BY class_type
+            ORDER BY current_ranking ASC
+          )::int AS class_ranking,
+          class_type,
+          skill_branch_type,
+          win_count,
+          lose_count,
+          draw_count,
+          updated_at
+        FROM
+          deduplicated_ranking
       )
       SELECT
         user_no,
         user_nickname,
         current_ranking,
+        class_ranking,
         class_type,
         skill_branch_type,
         win_count,
@@ -1530,9 +1609,10 @@ async function getRanking({ region, season, classType, headers } = {}) {
         draw_count,
         updated_at
       FROM
-        deduplicated_ranking
+        ranked_with_class
       WHERE
         ($3::smallint IS NULL OR class_type = $3::smallint)
+        AND ($3::smallint IS NOT NULL OR current_ranking <= 100)
       ORDER BY
         current_ranking ASC
       LIMIT 100
@@ -1553,6 +1633,10 @@ async function getRanking({ region, season, classType, headers } = {}) {
         p.current_ranking !== null && p.current_ranking !== undefined
           ? Number(p.current_ranking)
           : index + 1,
+      class_ranking:
+        p.class_ranking !== null && p.class_ranking !== undefined
+          ? Number(p.class_ranking)
+          : null,
       user_no: p.user_no ? String(p.user_no) : null,
       user_nickname: p.user_nickname,
       class_type: Number(p.class_type),
