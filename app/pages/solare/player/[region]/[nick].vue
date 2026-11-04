@@ -193,12 +193,6 @@
                 }}
               </span>
             </div>
-            <div v-if="profile.class_ranking" class="solare-header-stat-item">
-              <span class="solare-header-stat-label">CLASS RANK</span>
-              <span class="solare-header-stat-value font-mono text-[#d4af6a]">
-                #{{ profile.class_ranking }} {{ primaryClassName }}
-              </span>
-            </div>
             <div class="solare-header-stat-item">
               <span class="solare-header-stat-label">BEST WIN STREAK</span>
               <span

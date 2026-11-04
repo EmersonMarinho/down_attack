@@ -1307,13 +1307,13 @@ async function getPlayerProfile({
   const canonicalUserNo =
     playerRow?.user_no || latestUserNo || resolvedUserNo || null;
   const primaryClassType =
-    (isPlayerRowForTargetSeason ? playerRow.class_type : null) ??
     classes[0]?.class_type ??
+    (isPlayerRowForTargetSeason ? playerRow.class_type : null) ??
     playerRow?.class_type ??
     null;
   const primarySkillBranchType =
-    (isPlayerRowForTargetSeason ? playerRow.skill_branch_type : null) ??
     classes[0]?.skill_branch_type ??
+    (isPlayerRowForTargetSeason ? playerRow.skill_branch_type : null) ??
     playerRow?.skill_branch_type ??
     null;
 
@@ -1438,6 +1438,42 @@ async function getPlayerProfile({
             last_seen_at DESC,
             win_count DESC
         ),
+        ranking_with_most_played_class AS (
+          SELECT
+            dr.user_no,
+            dr.user_nickname,
+            dr.current_ranking,
+            COALESCE(mp_top.class_type, dr.class_type)::smallint AS class_type
+          FROM
+            deduplicated_ranking dr
+          LEFT JOIN LATERAL (
+            SELECT
+              mp.class_type
+            FROM
+              solare_match_players mp
+            INNER JOIN
+              solare_matches m
+              ON m.region = mp.region AND m.record_no = mp.record_no
+            WHERE
+              mp.region = $1
+              AND (
+                m.season = $2
+                OR ($2 = 9 AND m.season IS NULL)
+              )
+              AND (
+                (dr.user_no IS NOT NULL AND mp.user_no = dr.user_no)
+                OR ((dr.user_no IS NULL OR mp.user_no IS NULL) AND LOWER(mp.user_nickname) = LOWER(dr.user_nickname))
+              )
+            GROUP BY
+              mp.class_type,
+              mp.skill_branch_type
+            ORDER BY
+              COUNT(*) DESC,
+              SUM(CASE WHEN mp.is_winner THEN 1 ELSE 0 END) DESC,
+               mp.class_type ASC
+            LIMIT 1
+          ) mp_top ON true
+        ),
         ranked_with_class AS (
           SELECT
             user_no,
@@ -1449,7 +1485,7 @@ async function getPlayerProfile({
               ORDER BY current_ranking ASC
             )::int AS class_ranking
           FROM
-            deduplicated_ranking
+            ranking_with_most_played_class
         )
         SELECT
           current_ranking,
@@ -1579,6 +1615,48 @@ async function getRanking({ region, season, classType, headers } = {}) {
           last_seen_at DESC,
           win_count DESC
       ),
+      ranking_with_most_played_class AS (
+        SELECT
+          dr.user_no,
+          dr.user_nickname,
+          dr.current_ranking,
+          COALESCE(mp_top.class_type, dr.class_type)::smallint AS class_type,
+          COALESCE(mp_top.skill_branch_type, dr.skill_branch_type)::smallint AS skill_branch_type,
+          dr.win_count,
+          dr.lose_count,
+          dr.draw_count,
+          dr.updated_at
+        FROM
+          deduplicated_ranking dr
+        LEFT JOIN LATERAL (
+          SELECT
+            mp.class_type,
+            mp.skill_branch_type
+          FROM
+            solare_match_players mp
+          INNER JOIN
+            solare_matches m
+            ON m.region = mp.region AND m.record_no = mp.record_no
+          WHERE
+            mp.region = $1
+            AND (
+              m.season = $2
+              OR ($2 = 9 AND m.season IS NULL)
+            )
+            AND (
+              (dr.user_no IS NOT NULL AND mp.user_no = dr.user_no)
+              OR ((dr.user_no IS NULL OR mp.user_no IS NULL) AND LOWER(mp.user_nickname) = LOWER(dr.user_nickname))
+            )
+          GROUP BY
+            mp.class_type,
+            mp.skill_branch_type
+          ORDER BY
+            COUNT(*) DESC,
+            SUM(CASE WHEN mp.is_winner THEN 1 ELSE 0 END) DESC,
+            mp.class_type ASC
+          LIMIT 1
+        ) mp_top ON true
+      ),
       ranked_with_class AS (
         SELECT
           user_no,
@@ -1595,7 +1673,7 @@ async function getRanking({ region, season, classType, headers } = {}) {
           draw_count,
           updated_at
         FROM
-          deduplicated_ranking
+          ranking_with_most_played_class
       )
       SELECT
         user_no,
