@@ -218,3 +218,48 @@ export function getTierInfo(rating, ranking = 999) {
     TIER_BADGES[tier.code] || "/images/solare/tiers/beginner-soldier.png";
   return tier;
 }
+
+// Arena of Solare class assets, named after the class (e.g. "dark-knight.png").
+const SOLARE_GAME_ASSETS = "/images/solare/game";
+
+export function getClassSlug(classType) {
+  if (classType === undefined || classType === null) return null;
+  const name = BDO_CLASSES[Number(classType)];
+  return name ? name.toLowerCase().replace(/\s+/g, "-") : null;
+}
+
+function classAsset(folder, classType) {
+  const slug = getClassSlug(classType);
+  return slug ? `${SOLARE_GAME_ASSETS}/${folder}/${slug}.png` : null;
+}
+
+// Wide ranking-row portrait (450x130).
+export function getClassPortrait(classType) {
+  return classAsset("portraits", classType);
+}
+
+// Match slot portrait (190x80) used in the match history.
+export function getClassMatchSlot(classType) {
+  return classAsset("match", classType);
+}
+
+// Round face avatar (80x80, transparent corners).
+export function getClassAvatar(classType) {
+  return classAsset("avatars", classType);
+}
+
+// White class emblem (50x50, transparent background).
+export function getClassIcon(classType) {
+  return classAsset("class-icons", classType);
+}
+
+// Awakening / Succession / Ascension symbol (34x42).
+export function getSkillBranchIcon(classType, branchType) {
+  const slug = getClassSlug(classType);
+  if (!slug) return null;
+  const branch = getSkillBranch(classType, branchType);
+  if (branch === "Ascension") {
+    return `${SOLARE_GAME_ASSETS}/branch/ascension-${slug}.png`;
+  }
+  return `${SOLARE_GAME_ASSETS}/branch/${branch.toLowerCase()}.png`;
+}

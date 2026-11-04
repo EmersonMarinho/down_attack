@@ -5,6 +5,14 @@ import {
   getTierInfo,
   getClassName,
   getSkillBranch,
+  BDO_CLASSES,
+  ASCENSION_CLASSES,
+  getClassPortrait,
+  getClassMatchSlot,
+  getClassAvatar,
+  getClassIcon,
+  getSkillBranchIcon,
+  getClassSlug,
 } from "~/app/utils/solareTier.js";
 
 describe("app/utils/solareTier.js", () => {
@@ -204,6 +212,65 @@ describe("app/utils/solareTier.js", () => {
       expect(getSkillBranch(6, 1)).toBe("Ascension");
       expect(getClassName(29)).toBe("Archer");
       expect(getSkillBranch(29, 1)).toBe("Ascension");
+    });
+  });
+
+  describe("in-game class assets", () => {
+    const publicFile = (url) => path.join(process.cwd(), "public", url);
+
+    test("every BDO class has portrait, match slot, avatar and class icon files on disk", () => {
+      for (const classType of Object.keys(BDO_CLASSES)) {
+        for (const url of [
+          getClassPortrait(classType),
+          getClassMatchSlot(classType),
+          getClassAvatar(classType),
+          getClassIcon(classType),
+        ]) {
+          expect(fs.existsSync(publicFile(url))).toBe(true);
+        }
+      }
+    });
+
+    test("every class resolves a skill branch icon that exists on disk", () => {
+      for (const classType of Object.keys(BDO_CLASSES)) {
+        for (const branchType of [1, 2]) {
+          const url = getSkillBranchIcon(classType, branchType);
+          expect(fs.existsSync(publicFile(url))).toBe(true);
+        }
+      }
+    });
+
+    test("maps branch icons to awakening, succession and per-class ascension", () => {
+      expect(getSkillBranchIcon(12, 1)).toBe(
+        "/images/solare/game/branch/awakening.png",
+      );
+      expect(getSkillBranchIcon(12, 2)).toBe(
+        "/images/solare/game/branch/succession.png",
+      );
+      expect(getSkillBranchIcon(3, 1)).toBe(
+        "/images/solare/game/branch/ascension-wukong.png",
+      );
+      for (const classType of ASCENSION_CLASSES) {
+        expect(getSkillBranchIcon(classType, 1)).toBe(
+          `/images/solare/game/branch/ascension-${getClassSlug(classType)}.png`,
+        );
+      }
+    });
+
+    test("names files after the class in English", () => {
+      expect(getClassAvatar(0)).toBe("/images/solare/game/avatars/warrior.png");
+      expect(getClassPortrait(27)).toBe(
+        "/images/solare/game/portraits/dark-knight.png",
+      );
+      expect(getClassIcon(34)).toBe(
+        "/images/solare/game/class-icons/deadeye.png",
+      );
+    });
+
+    test("returns null for unknown classes", () => {
+      expect(getClassPortrait(null)).toBeNull();
+      expect(getClassAvatar(999)).toBeNull();
+      expect(getSkillBranchIcon(undefined, 1)).toBeNull();
     });
   });
 });
