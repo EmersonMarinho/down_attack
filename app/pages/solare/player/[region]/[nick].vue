@@ -105,8 +105,12 @@
                       : `UNRANKED ${profile.region}`
                   }}
                 </span>
+                <span v-if="profile.class_ranking" class="solare-top-tag">
+                  TOP #{{ profile.class_ranking }}
+                  {{ primaryClassName.toUpperCase() }}
+                </span>
                 <span
-                  v-if="
+                  v-else-if="
                     profile.current_ranking && profile.current_ranking <= 100
                   "
                   class="solare-top-tag"
@@ -266,7 +270,7 @@
                   </span>
                 </div>
                 <div>
-                  <span class="block text-[10px] text-[#7d7e86]">AVG PEN</span>
+                  <span class="block text-[10px] text-[#7d7e86]">AVG CC</span>
                   <span class="text-xs font-semibold text-[#d4af6a]">
                     {{ profile.averages?.cc ?? 0 }}
                   </span>
@@ -959,9 +963,7 @@
                         <span>{{ team.title }}</span>
                       </span>
                       <span class="text-center">K / D</span>
-                      <span class="text-right" title="Crowd Control / Penalty">
-                        PEN
-                      </span>
+                      <span class="text-right" title="Crowd Control"> CC </span>
                       <span class="text-right" title="Damage Dealt">DMG</span>
                       <span class="text-right" title="Damage Taken">TAKEN</span>
                       <span class="text-right" title="Recovery / Healing">

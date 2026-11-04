@@ -1307,13 +1307,13 @@ async function getPlayerProfile({
   const canonicalUserNo =
     playerRow?.user_no || latestUserNo || resolvedUserNo || null;
   const primaryClassType =
-    (isPlayerRowForTargetSeason ? playerRow.class_type : null) ??
     classes[0]?.class_type ??
+    (isPlayerRowForTargetSeason ? playerRow.class_type : null) ??
     playerRow?.class_type ??
     null;
   const primarySkillBranchType =
-    (isPlayerRowForTargetSeason ? playerRow.skill_branch_type : null) ??
     classes[0]?.skill_branch_type ??
+    (isPlayerRowForTargetSeason ? playerRow.skill_branch_type : null) ??
     playerRow?.skill_branch_type ??
     null;
 
@@ -1410,15 +1410,111 @@ async function getPlayerProfile({
     });
   }
 
+  let activeCurrentRanking = null;
+  let activeClassRanking = null;
+
+  if (isPlayerRowForTargetSeason && playerRow.current_ranking !== null) {
+    const rankingPositionResult = await database.query({
+      text: `
+        WITH deduplicated_ranking AS (
+          SELECT DISTINCT ON (current_ranking)
+            user_no,
+            user_nickname,
+            current_ranking,
+            class_type
+          FROM
+            solare_players
+          WHERE
+            region = $1
+            AND current_ranking IS NOT NULL
+            AND current_ranking >= 1
+            AND (
+              season = $2
+              OR ($2 = 9 AND season IS NULL)
+            )
+          ORDER BY
+            current_ranking ASC,
+            updated_at DESC,
+            last_seen_at DESC,
+            win_count DESC
+        ),
+        ranking_with_most_played_class AS (
+          SELECT
+            dr.user_no,
+            dr.user_nickname,
+            dr.current_ranking,
+            COALESCE(mp_top.class_type, dr.class_type)::smallint AS class_type
+          FROM
+            deduplicated_ranking dr
+          LEFT JOIN LATERAL (
+            SELECT
+              mp.class_type
+            FROM
+              solare_match_players mp
+            INNER JOIN
+              solare_matches m
+              ON m.region = mp.region AND m.record_no = mp.record_no
+            WHERE
+              mp.region = $1
+              AND (
+                m.season = $2
+                OR ($2 = 9 AND m.season IS NULL)
+              )
+              AND (
+                (dr.user_no IS NOT NULL AND mp.user_no = dr.user_no)
+                OR ((dr.user_no IS NULL OR mp.user_no IS NULL) AND LOWER(mp.user_nickname) = LOWER(dr.user_nickname))
+              )
+            GROUP BY
+              mp.class_type,
+              mp.skill_branch_type
+            ORDER BY
+              COUNT(*) DESC,
+              SUM(CASE WHEN mp.is_winner THEN 1 ELSE 0 END) DESC,
+               mp.class_type ASC
+            LIMIT 1
+          ) mp_top ON true
+        ),
+        ranked_with_class AS (
+          SELECT
+            user_no,
+            user_nickname,
+            current_ranking,
+            class_type,
+            ROW_NUMBER() OVER (
+              PARTITION BY class_type
+              ORDER BY current_ranking ASC
+            )::int AS class_ranking
+          FROM
+            ranking_with_most_played_class
+        )
+        SELECT
+          current_ranking,
+          class_ranking
+        FROM
+          ranked_with_class
+        WHERE
+          ($3::bigint IS NOT NULL AND user_no = $3::bigint)
+          OR LOWER(user_nickname) = LOWER($4)
+        LIMIT 1
+        ;`,
+      values: [targetRegion, targetSeason, canonicalUserNo, canonicalNick],
+    });
+
+    if (rankingPositionResult.rowCount > 0) {
+      activeCurrentRanking = Number(
+        rankingPositionResult.rows[0].current_ranking,
+      );
+      activeClassRanking = Number(rankingPositionResult.rows[0].class_ranking);
+    }
+  }
+
   return {
     region: targetRegion,
     season: targetSeason,
     user_nickname: canonicalNick,
     user_no: canonicalUserNo ? String(canonicalUserNo) : null,
-    current_ranking:
-      isPlayerRowForTargetSeason && playerRow.current_ranking !== null
-        ? Number(playerRow.current_ranking)
-        : null,
+    current_ranking: activeCurrentRanking,
+    class_ranking: activeClassRanking,
     class_type: primaryClassType !== null ? Number(primaryClassType) : null,
     skill_branch_type:
       primarySkillBranchType !== null ? Number(primarySkillBranchType) : null,
@@ -1508,7 +1604,7 @@ async function getRanking({ region, season, classType, headers } = {}) {
         WHERE
           region = $1
           AND current_ranking IS NOT NULL
-          AND current_ranking BETWEEN 1 AND 100
+          AND current_ranking >= 1
           AND (
             season = $2
             OR ($2 = 9 AND season IS NULL)
@@ -1518,11 +1614,72 @@ async function getRanking({ region, season, classType, headers } = {}) {
           updated_at DESC,
           last_seen_at DESC,
           win_count DESC
+      ),
+      ranking_with_most_played_class AS (
+        SELECT
+          dr.user_no,
+          dr.user_nickname,
+          dr.current_ranking,
+          COALESCE(mp_top.class_type, dr.class_type)::smallint AS class_type,
+          COALESCE(mp_top.skill_branch_type, dr.skill_branch_type)::smallint AS skill_branch_type,
+          dr.win_count,
+          dr.lose_count,
+          dr.draw_count,
+          dr.updated_at
+        FROM
+          deduplicated_ranking dr
+        LEFT JOIN LATERAL (
+          SELECT
+            mp.class_type,
+            mp.skill_branch_type
+          FROM
+            solare_match_players mp
+          INNER JOIN
+            solare_matches m
+            ON m.region = mp.region AND m.record_no = mp.record_no
+          WHERE
+            mp.region = $1
+            AND (
+              m.season = $2
+              OR ($2 = 9 AND m.season IS NULL)
+            )
+            AND (
+              (dr.user_no IS NOT NULL AND mp.user_no = dr.user_no)
+              OR ((dr.user_no IS NULL OR mp.user_no IS NULL) AND LOWER(mp.user_nickname) = LOWER(dr.user_nickname))
+            )
+          GROUP BY
+            mp.class_type,
+            mp.skill_branch_type
+          ORDER BY
+            COUNT(*) DESC,
+            SUM(CASE WHEN mp.is_winner THEN 1 ELSE 0 END) DESC,
+            mp.class_type ASC
+          LIMIT 1
+        ) mp_top ON true
+      ),
+      ranked_with_class AS (
+        SELECT
+          user_no,
+          user_nickname,
+          current_ranking,
+          ROW_NUMBER() OVER (
+            PARTITION BY class_type
+            ORDER BY current_ranking ASC
+          )::int AS class_ranking,
+          class_type,
+          skill_branch_type,
+          win_count,
+          lose_count,
+          draw_count,
+          updated_at
+        FROM
+          ranking_with_most_played_class
       )
       SELECT
         user_no,
         user_nickname,
         current_ranking,
+        class_ranking,
         class_type,
         skill_branch_type,
         win_count,
@@ -1530,9 +1687,10 @@ async function getRanking({ region, season, classType, headers } = {}) {
         draw_count,
         updated_at
       FROM
-        deduplicated_ranking
+        ranked_with_class
       WHERE
         ($3::smallint IS NULL OR class_type = $3::smallint)
+        AND ($3::smallint IS NOT NULL OR current_ranking <= 100)
       ORDER BY
         current_ranking ASC
       LIMIT 100
@@ -1553,6 +1711,10 @@ async function getRanking({ region, season, classType, headers } = {}) {
         p.current_ranking !== null && p.current_ranking !== undefined
           ? Number(p.current_ranking)
           : index + 1,
+      class_ranking:
+        p.class_ranking !== null && p.class_ranking !== undefined
+          ? Number(p.class_ranking)
+          : null,
       user_no: p.user_no ? String(p.user_no) : null,
       user_nickname: p.user_nickname,
       class_type: Number(p.class_type),
