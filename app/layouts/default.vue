@@ -128,6 +128,21 @@
                       WebkitMask: `url(/icons/overlay.png) no-repeat center / contain`,
                     }"
                   />
+                  <span>Arena of Solare Search</span>
+                </NuxtLink>
+              </li>
+              <li>
+                <NuxtLink
+                  to="/solare/overlay"
+                  class="group inline-flex items-center gap-3 text-[14px] text-[#cfd2dc] hover:text-white transition-colors duration-150"
+                >
+                  <span
+                    class="w-4 h-4 bg-[#848895] group-hover:bg-white transition-colors duration-150 shrink-0 inline-block"
+                    :style="{
+                      mask: `url(/icons/overlay.png) no-repeat center / contain`,
+                      WebkitMask: `url(/icons/overlay.png) no-repeat center / contain`,
+                    }"
+                  />
                   <span>Arena of Solare Overlay</span>
                 </NuxtLink>
               </li>
@@ -306,7 +321,7 @@ const tabs = [
   },
   {
     id: "solare",
-    name: "Solare Overlay",
+    name: "Arena of Solare",
     icon: "/icons/overlay.png",
     path: "/solare",
   },

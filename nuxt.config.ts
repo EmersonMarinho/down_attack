@@ -65,7 +65,19 @@ export default defineNuxtConfig({
         },
         { name: "twitter:card", content: "summary" },
       ],
-      link: [{ rel: "icon", type: "image/x-icon", href: "/favicon.ico" }],
+      link: [
+        { rel: "icon", type: "image/x-icon", href: "/favicon.ico" },
+        { rel: "preconnect", href: "https://fonts.googleapis.com" },
+        {
+          rel: "preconnect",
+          href: "https://fonts.gstatic.com",
+          crossorigin: "",
+        },
+        {
+          rel: "stylesheet",
+          href: "https://fonts.googleapis.com/css2?family=Cinzel:wght@600;700&family=IBM+Plex+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500;600&display=swap",
+        },
+      ],
       script: [
         // Shows the skill details (tooltip) when hovering Bdolytics links
         { src: "https://bdolytics.com/tooltip/script.js", async: true },
