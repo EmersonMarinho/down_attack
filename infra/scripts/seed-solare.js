@@ -32,6 +32,7 @@ async function seedSolare() {
       text: `
         INSERT INTO solare_players (
           region,
+          season,
           user_no,
           user_nickname,
           current_ranking,
@@ -42,9 +43,10 @@ async function seedSolare() {
           draw_count,
           win_average
         )
-        VALUES ('SA', 777001, 'Okazaki', 65, 20, 2, 79, 50, 0, '61.25%')
+        VALUES ('SA', 9, 777001, 'Okazaki', 65, 20, 2, 79, 50, 0, '61.25%')
         ON CONFLICT (region, user_no)
         DO UPDATE SET
+          season = EXCLUDED.season,
           user_nickname = EXCLUDED.user_nickname,
           current_ranking = EXCLUDED.current_ranking,
           class_type = EXCLUDED.class_type,
@@ -114,8 +116,8 @@ async function seedSolare() {
       for (const m of initialMatches) {
         await client.query({
           text: `
-            INSERT INTO solare_matches (region, record_no, play_time_seconds, win_record, match_date)
-            VALUES ('SA', $1, 300, '{1,1,0}', timezone('utc', now()))
+            INSERT INTO solare_matches (region, season, record_no, play_time_seconds, win_record, match_date)
+            VALUES ('SA', 9, $1, 300, '{2,2,3,2}', timezone('utc', now()))
             ON CONFLICT (region, record_no) DO NOTHING
             ;`,
           values: [m.record_no],
@@ -174,8 +176,8 @@ async function seedSolare() {
 
       await client.query({
         text: `
-          INSERT INTO solare_matches (region, record_no, play_time_seconds, win_record, match_date)
-          VALUES ('SA', $1, 315, '{1,1,0}', timezone('utc', now()))
+          INSERT INTO solare_matches (region, season, record_no, play_time_seconds, win_record, match_date)
+          VALUES ('SA', 9, $1, 315, '{2,2,3,2}', timezone('utc', now()))
           ON CONFLICT (region, record_no) DO NOTHING
           ;`,
         values: [nextRecordNo],
