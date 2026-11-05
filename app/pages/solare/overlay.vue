@@ -686,7 +686,7 @@
                               : 'text-stone-400'
                           "
                         >
-                          340 × 520 px
+                          340 × 680 px
                         </span>
                       </div>
                       <p class="text-[11px] text-stone-400 leading-tight">
@@ -723,7 +723,7 @@
                               : 'text-stone-400'
                           "
                         >
-                          790 × 200 px
+                          795 × 260 px
                         </span>
                       </div>
                       <p class="text-[11px] text-stone-400 leading-tight">
@@ -970,7 +970,7 @@
                             stroke-width="2"
                           />
                         </svg>
-                        <span>Vertical (340px)</span>
+                        <span>Vertical (340×680)</span>
                       </button>
                       <button
                         type="button"
@@ -997,7 +997,7 @@
                             stroke-width="2"
                           />
                         </svg>
-                        <span>Horizontal (790px)</span>
+                        <span>Horizontal (795×260)</span>
                       </button>
                     </div>
                   </div>
