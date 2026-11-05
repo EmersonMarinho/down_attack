@@ -2,12 +2,12 @@
   <!-- VERTICAL LAYOUT (Portrait - 340px) -->
   <aside
     v-if="layout === 'vertical'"
-    class="w-full max-w-[340px] bg-[#181615] rounded text-white overflow-hidden solare-outer-frame shadow-2xl select-none"
+    class="w-[340px] min-w-[340px] max-w-[340px] shrink-0 bg-[#181615] rounded text-white overflow-hidden solare-outer-frame shadow-2xl select-none"
     data-purpose="stream-card-overlay-vertical"
   >
     <!-- Header -->
     <header
-      class="bg-[#826744] px-3 py-1.5 flex items-center justify-between text-neutral-100 font-bold border-b border-[#5e492d]"
+      class="bg-[#826744] px-3 h-9 flex items-center justify-between text-neutral-100 font-bold border-b border-[#5e492d]"
     >
       <div class="flex items-center gap-2 tracking-wide min-w-0">
         <img
@@ -69,7 +69,7 @@
     <div class="p-2.5 space-y-2.5">
       <!-- Block 1: Player Profile Card -->
       <section
-        class="bg-[#201d1b] rounded solare-inner-border p-2.5 flex items-center gap-3"
+        class="bg-[#201d1b] rounded solare-inner-border p-2.5 h-[108px] flex items-center gap-3"
         data-purpose="player-profile"
       >
         <div
@@ -91,7 +91,7 @@
         </div>
 
         <div class="flex-1 min-w-0">
-          <div class="flex items-center gap-2 flex-wrap">
+          <div class="flex items-center gap-2 min-w-0">
             <h2
               class="text-xl font-black tracking-tight text-white leading-tight truncate"
             >
@@ -99,7 +99,7 @@
             </h2>
             <span
               v-if="rankingNumber"
-              class="bg-[#302a24] text-[#cfbe9e] text-xs font-black px-2 py-0.5 rounded border border-[#4d4031]"
+              class="bg-[#302a24] text-[#cfbe9e] text-xs font-black px-2 py-0.5 rounded border border-[#4d4031] shrink-0"
             >
               #{{ rankingNumber }}
             </span>
@@ -127,7 +127,9 @@
           </div>
         </div>
 
-        <p class="text-xs font-black text-[#ebdcc6] tracking-wider uppercase">
+        <p
+          class="text-xs font-black text-[#ebdcc6] tracking-wider uppercase truncate"
+        >
           {{ tierInfo.name }}
         </p>
         <div
@@ -253,7 +255,7 @@
             </div>
 
             <footer
-              class="pt-1.5 flex justify-between items-center text-xs font-bold text-[#d2c3af] px-1 border-t border-[#362f27]/70"
+              class="pt-1.5 h-7 flex justify-between items-center text-xs font-bold text-[#d2c3af] px-1 border-t border-[#362f27]/70 whitespace-nowrap"
             >
               <div>
                 Kills/Match:
@@ -343,35 +345,33 @@
             </div>
 
             <footer
-              class="pt-1.5 flex flex-col gap-1.5 px-1 border-t border-[#362f27]/70"
+              class="pt-1.5 h-7 flex items-center justify-between px-1 border-t border-[#362f27]/70 whitespace-nowrap"
             >
-              <div class="flex items-center justify-between">
+              <span
+                class="text-[11px] uppercase font-black tracking-wider text-[#ebdcc6] shrink-0"
+              >
+                LAST 5:
+              </span>
+              <div
+                v-if="recentDeltas.length > 0"
+                class="flex items-center gap-1 shrink-0"
+              >
                 <span
-                  class="text-[11px] uppercase font-black tracking-wider text-[#ebdcc6]"
+                  v-for="(delta, idx) in recentDeltas"
+                  :key="idx"
+                  class="text-[11px] font-black px-1.5 py-0.5 rounded leading-none border"
+                  :class="
+                    delta >= 0
+                      ? 'bg-[#10b981]/15 border-[#10b981]/40 text-[#10b981]'
+                      : 'bg-[#ef4444]/15 border-[#ef4444]/40 text-[#ef4444]'
+                  "
                 >
-                  LAST 5 MATCHES
-                </span>
-                <div
-                  v-if="recentDeltas.length > 0"
-                  class="flex items-center gap-1"
-                >
-                  <span
-                    v-for="(delta, idx) in recentDeltas"
-                    :key="idx"
-                    class="text-[11px] font-black px-1.5 py-0.5 rounded leading-none border"
-                    :class="
-                      delta >= 0
-                        ? 'bg-[#10b981]/15 border-[#10b981]/40 text-[#10b981]'
-                        : 'bg-[#ef4444]/15 border-[#ef4444]/40 text-[#ef4444]'
-                    "
-                  >
-                    {{ delta >= 0 ? `+${delta}` : delta }}
-                  </span>
-                </div>
-                <span v-else class="text-[11px] font-bold text-[#948a80]">
-                  No matches yet
+                  {{ delta >= 0 ? `+${delta}` : delta }}
                 </span>
               </div>
+              <span v-else class="text-[11px] font-bold text-[#948a80]">
+                No matches yet
+              </span>
             </footer>
           </div>
         </div>
