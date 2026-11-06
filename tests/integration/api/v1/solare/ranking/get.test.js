@@ -107,6 +107,20 @@ describe("GET /api/v1/solare/ranking", () => {
         draw_count: 0,
       });
 
+      const matchOutcomes = [true, false, true, true, false, true];
+      for (let i = 0; i < matchOutcomes.length; i += 1) {
+        await orchestrator.createSolareMatch({
+          region: "SA",
+          season: 9,
+          record_no: 950000 + i,
+          user_nickname: "Okazaki",
+          user_no: 1001,
+          class_type: 20,
+          skill_branch_type: 2,
+          is_winner: matchOutcomes[i],
+        });
+      }
+
       // 1. SA Leaderboard ordered by current_ranking ASC (deduplicating stale rank #90)
       const saRes = await fetch(
         `${webserver.origin}/api/v1/solare/ranking?region=sa`,
@@ -132,7 +146,9 @@ describe("GET /api/v1/solare/ranking", () => {
         losses: 67,
         total_games: 176,
         winrate: 61.9,
+        recent_matches: [true, false, true, true, false],
       });
+      expect(saBody.players[1].recent_matches).toEqual([]);
       expect(saBody.players.map((p) => p.class_ranking)).toEqual([1, 1, 2, 3]);
 
       // 2. Filter by class_type=8 (Sorceress)
