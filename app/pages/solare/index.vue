@@ -1,104 +1,140 @@
 <template>
   <div class="solare-home-page">
-    <div class="solare-home-container">
-      <!-- TOP BAR WITH STREAM OVERLAY CTA -->
-      <div class="solare-home-topbar">
-        <div class="flex items-center gap-2.5">
-          <span class="solare-live-dot" />
-          <span class="font-mono text-[11px] tracking-[0.08em] text-[#9a9aa3]">
-            COMPETITIVE SEASON {{ activeSeason }} ACTIVE • OFFICIAL 3V3 RANKED
-          </span>
+    <main
+      class="flex-1 w-full max-w-[1440px] mx-auto px-4 md:px-8 py-6 flex flex-col gap-6"
+    >
+      <!-- TOP HEADER SECTION -->
+      <div class="w-full max-w-[1240px] mx-auto flex flex-col gap-5 pt-2">
+        <!-- Top Micro Bar -->
+        <div class="flex items-center justify-between flex-wrap gap-3">
+          <div
+            class="flex items-center gap-2 text-xs font-mono tracking-wider text-slate-400"
+          >
+            <span
+              class="inline-block w-2.5 h-2.5 rounded-full bg-emerald-500 shadow-[0_0_8px_rgba(16,185,129,0.8)]"
+            />
+            <span
+              class="uppercase tracking-widest text-[11px] text-slate-300 font-semibold"
+            >
+              COMPETITIVE SEASON {{ activeSeason }} ACTIVE • OFFICIAL 3V3 RANKED
+            </span>
+          </div>
+
+          <NuxtLink
+            to="/solare/overlay"
+            class="flex items-center gap-2 px-3.5 py-1.5 rounded-lg border border-[#3d424e]/70 bg-[#16181d]/80 hover:bg-[#20232a] text-[#d4af37] text-xs font-mono font-medium tracking-wide transition-all shadow-sm"
+          >
+            <svg
+              width="15"
+              height="15"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2"
+              class="text-[#d4af37] shrink-0"
+            >
+              <rect x="2" y="3" width="20" height="14" rx="2" />
+              <path d="M8 21h8M12 17v4" />
+            </svg>
+            <span>OBS Stream Overlay &amp; Chat Bot (!solare)</span>
+          </NuxtLink>
         </div>
 
-        <NuxtLink to="/solare/overlay" class="solare-overlay-cta">
-          <svg
-            width="14"
-            height="14"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            stroke-width="2"
+        <!-- Main Title Card Container -->
+        <section
+          class="rounded-xl border border-[#2b2d35] bg-[#14151a] p-8 md:p-10 flex flex-col items-center text-center shadow-2xl relative"
+        >
+          <h1
+            class="solare-serif text-2xl sm:text-3xl md:text-[38px] tracking-[0.14em] text-[#f0e3c8] font-medium uppercase mb-3 leading-tight"
           >
-            <rect x="2" y="3" width="20" height="14" rx="2" />
-            <path d="M8 21h8M12 17v4" />
-          </svg>
-          <span>OBS Stream Overlay &amp; Chat Bot (!solare)</span>
-        </NuxtLink>
-      </div>
-
-      <!-- HERO SEARCH CARD -->
-      <section class="solare-hero-card">
-        <div class="text-center space-y-2 max-w-2xl mx-auto">
-          <h1 class="solare-hero-title">ARENA OF SOLARE PLAYER SEARCH</h1>
-          <p class="text-sm text-[#9a9aa3]">
+            ARENA OF SOLARE PLAYER SEARCH
+          </h1>
+          <p class="text-sm md:text-[15px] text-[#9a9eab] max-w-2xl mb-8">
             Search official 3v3 ranked match history, class performance, combat
             averages, and regional Top 100 leaderboards.
           </p>
-        </div>
 
-        <!-- SEARCH BAR + REGION PILLS -->
-        <div class="solare-search-box">
-          <div class="solare-region-strip">
-            <span
-              class="font-mono text-[11px] tracking-[0.08em] text-[#7d7e86] mr-1"
-            >
-              REGION:
-            </span>
-            <button
-              v-for="reg in regions"
-              :key="reg"
-              type="button"
-              class="solare-region-btn"
-              :class="{ 'solare-region-btn--active': selectedRegion === reg }"
-              @click="changeRegion(reg)"
-            >
-              {{ reg }}
-            </button>
-          </div>
+          <!-- Region tabs & Search bar container -->
+          <div
+            class="w-full max-w-2xl rounded-xl border border-[#262830] bg-[#111216] p-4 flex flex-col gap-4"
+          >
+            <!-- Region Selector Row -->
+            <div class="flex items-center gap-2 flex-wrap text-xs font-mono">
+              <span
+                class="text-[#7d8291] font-semibold text-[11px] uppercase tracking-wider mr-1"
+              >
+                REGION:
+              </span>
+              <button
+                v-for="reg in regions"
+                :key="reg"
+                type="button"
+                :class="
+                  selectedRegion === reg
+                    ? 'px-3 py-1 rounded bg-[#d4af37] text-[#1c1808] font-bold text-xs shadow-sm hover:brightness-105 transition-all'
+                    : 'px-3 py-1 rounded bg-[#1a1c22] text-[#9398a7] hover:text-white hover:bg-[#242730] transition-colors border border-[#2b2e38] text-xs font-medium'
+                "
+                @click="changeRegion(reg)"
+              >
+                {{ reg }}
+              </button>
+            </div>
 
-          <form class="solare-hero-form" @submit.prevent="handlePlayerSearch">
-            <svg
-              class="w-4 h-4 text-[#7d7e86] ml-3.5 shrink-0"
-              fill="none"
-              stroke="currentColor"
-              viewBox="0 0 24 24"
+            <!-- Search Input Bar -->
+            <form
+              class="flex items-stretch rounded-lg border border-[#2e313c] bg-[#16181f] overflow-hidden focus-within:border-[#d4af37]/60 transition-colors"
+              @submit.prevent="handlePlayerSearch"
             >
-              <path
-                stroke-linecap="round"
-                stroke-linejoin="round"
-                stroke-width="2"
-                d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"
+              <div class="flex items-center pl-3.5 pr-2 text-[#7d8291]">
+                <svg
+                  class="w-4 h-4 shrink-0"
+                  fill="none"
+                  stroke="currentColor"
+                  viewBox="0 0 24 24"
+                >
+                  <path
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                    stroke-width="2"
+                    d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"
+                  />
+                </svg>
+              </div>
+              <input
+                v-model="searchInput"
+                type="text"
+                placeholder="Enter Family Name (e.g., Okazaki, Shamsir, Neri)..."
+                class="flex-1 bg-transparent border-none text-sm text-[#e3e2e6] placeholder-[#5d6373] focus:outline-none focus:ring-0 py-2.5 px-1"
               />
-            </svg>
-            <input
-              v-model="searchInput"
-              type="text"
-              placeholder="Enter Family Name (e.g., Okazaki, Shamsir, Neri)..."
-              class="solare-hero-input"
-            />
-            <button type="submit" class="solare-hero-submit">SEARCH</button>
-          </form>
-        </div>
-      </section>
+              <button
+                type="submit"
+                class="bg-[#d4af37] hover:bg-[#dfba42] text-[#1c1808] font-bold text-xs uppercase px-7 tracking-wider transition-colors flex items-center justify-center"
+              >
+                SEARCH
+              </button>
+            </form>
+          </div>
+        </section>
+      </div>
 
-      <!-- TOP 100 LEADERBOARD SECTION -->
-      <section class="solare-ranking-section">
-        <div class="solare-ranking-header">
-          <div>
-            <h2 class="solare-ranking-title">
+      <!-- LEADERBOARD SECTION -->
+      <section
+        class="w-full max-w-[1240px] mx-auto py-2 px-2 flex flex-col gap-1.5 select-none"
+      >
+        <!-- Filter Controls -->
+        <div class="flex items-center justify-between gap-3 flex-wrap mb-2">
+          <div class="flex items-center gap-2">
+            <h2
+              class="solare-serif text-base md:text-lg font-bold tracking-[0.08em] text-[#f0e3c8] uppercase"
+            >
               TOP 100 LEADERBOARD ({{ selectedRegion }})
             </h2>
-            <p class="text-xs text-[#7d7e86] mt-0.5">
-              Click any player to open their full 3v3 match history and combat
-              dashboard.
-            </p>
           </div>
 
-          <!-- Class Filter & Quick Filter -->
-          <div class="flex items-center gap-3 flex-wrap">
+          <div class="flex items-center gap-2.5 flex-wrap">
             <select
               v-model="selectedClassFilter"
-              class="solare-filter-select"
+              class="h-9 rounded-lg border border-[#2b2d35] bg-[#14151a] text-xs text-[#e3e2e6] px-3 focus:outline-none focus:border-[#d4af37]/70"
               aria-label="Filter by Class"
               @change="fetchRanking"
             >
@@ -116,143 +152,334 @@
               v-model="tableSearchFilter"
               type="text"
               placeholder="Filter leaderboard..."
-              class="solare-filter-input"
+              class="h-9 rounded-lg border border-[#2b2d35] bg-[#14151a] text-xs text-[#e3e2e6] placeholder-[#5d6373] px-3 focus:outline-none focus:border-[#d4af37]/70"
             />
           </div>
         </div>
 
-        <!-- Ranking Table Card -->
-        <div class="solare-ranking-card">
-          <div v-if="isLoadingRanking" class="py-16 text-center">
-            <div class="solare-spinner mx-auto mb-3" />
-            <p class="font-mono text-xs text-[#9a9aa3]">
-              Loading {{ selectedRegion }} Top 100 Leaderboard...
-            </p>
-          </div>
+        <!-- Loading / Empty States -->
+        <div
+          v-if="isLoadingRanking"
+          class="py-16 text-center rounded-xl border border-[#2b2d35] bg-[#14151a]"
+        >
+          <div class="solare-spinner mx-auto mb-3" />
+          <p class="font-mono text-xs text-[#9a9eab]">
+            Loading {{ selectedRegion }} Top 100 Leaderboard...
+          </p>
+        </div>
 
-          <div
-            v-else-if="filteredRankingPlayers.length === 0"
-            class="py-14 text-center text-sm text-[#7d7e86]"
-          >
-            No ranked players found for this filter in {{ selectedRegion }}.
-          </div>
+        <div
+          v-else-if="filteredRankingPlayers.length === 0"
+          class="py-14 text-center text-sm text-[#7d8291] rounded-xl border border-[#2b2d35] bg-[#14151a]"
+        >
+          No ranked players found for this filter in {{ selectedRegion }}.
+        </div>
 
-          <div v-else class="overflow-x-auto">
-            <table class="solare-ranking-table">
-              <thead>
-                <tr>
-                  <th class="w-20 text-center">RANK</th>
-                  <th class="text-left">PLAYER</th>
-                  <th class="text-left">CLASS &amp; SPEC</th>
-                  <th class="text-center">MATCHES</th>
-                  <th class="text-center">RECORD</th>
-                  <th class="w-48 text-right">WIN RATE</th>
-                </tr>
-              </thead>
-              <tbody>
-                <tr
-                  v-for="p in filteredRankingPlayers"
-                  :key="`${selectedRegion}-${p.user_no || p.user_nickname}`"
-                  class="solare-ranking-row"
-                  @click="goToPlayer(p.user_nickname)"
+        <!-- IN-GAME ACCURATE LEADERBOARD -->
+        <div v-else class="overflow-x-auto">
+          <div class="min-w-[820px] flex flex-col gap-1.5">
+            <!-- IN-GAME ACCURATE HEADER BAR -->
+            <div
+              class="grid grid-cols-12 items-center px-4 py-2.5 text-[#99907c] text-[12px] font-mono tracking-wider border-b border-[#4d4635]/30 mb-1 select-none"
+            >
+              <div class="col-span-5 flex items-center justify-between pr-4">
+                <span
+                  class="flex items-center gap-1.5 text-[#d0c5af] font-medium"
                 >
-                  <td class="text-center font-mono">
-                    <span
-                      class="solare-rank-pill"
-                      :class="{
-                        'solare-rank-pill--1': p.rank === 1,
-                        'solare-rank-pill--2': p.rank === 2,
-                        'solare-rank-pill--3': p.rank === 3,
-                      }"
+                  <svg
+                    class="w-4 h-4 text-[#f2ca50] shrink-0"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="2"
+                  >
+                    <circle cx="12" cy="12" r="10" />
+                    <path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3" />
+                    <line x1="12" y1="17" x2="12.01" y2="17" />
+                  </svg>
+                  <span>Solare Throne</span>
+                </span>
+                <span class="text-[#d0c5af] font-medium text-center pr-10">
+                  Family Name
+                </span>
+              </div>
+              <div class="col-span-2 text-center text-[#d0c5af] font-medium">
+                Win Rate
+              </div>
+              <div class="col-span-2 text-center text-[#d0c5af] font-medium">
+                W / D / L
+              </div>
+              <div class="col-span-2 text-center text-[#d0c5af] font-medium">
+                Recent Matches
+              </div>
+              <div
+                class="col-span-1 text-right text-[#d0c5af] font-medium pr-2"
+              >
+                Rating
+              </div>
+            </div>
+
+            <!-- PODIUM ROWS (RANKS 1, 2, 3) -->
+            <div
+              v-for="p in podiumPlayers"
+              :key="`podium-${selectedRegion}-${p.user_no || p.user_nickname}`"
+              class="grid grid-cols-12 items-center px-4 py-2 min-h-[96px] relative overflow-hidden select-none cursor-pointer transition-all hover:brightness-110"
+              :class="{
+                'border border-[#9b783e]/60 shadow-2xl podium-rank-1':
+                  p.rank === 1,
+                'border border-[#4a586d]/60 shadow-xl': p.rank === 2,
+                'border border-[#6b4832]/60 shadow-xl': p.rank === 3,
+              }"
+              :style="getPodiumBackgroundStyle(p.rank)"
+              @click="goToPlayer(p.user_nickname)"
+            >
+              <div class="col-span-5 flex items-center gap-2.5 z-10 min-w-0">
+                <div
+                  class="relative flex items-center justify-center flex-shrink-0 w-20 h-20 -my-2"
+                  :title="p.tierInfo?.name"
+                >
+                  <img
+                    v-if="p.tierBadgeUrl"
+                    :src="p.tierBadgeUrl"
+                    :alt="p.tierInfo?.name || 'Solare Rank Medallion'"
+                    class="w-20 h-20 object-contain"
+                    :class="{
+                      'drop-shadow-[0_0_12px_rgba(242,202,80,0.6)]':
+                        p.rank === 1,
+                      'drop-shadow-[0_0_12px_rgba(189,199,218,0.5)]':
+                        p.rank === 2,
+                      'drop-shadow-[0_0_12px_rgba(255,160,120,0.5)]':
+                        p.rank === 3,
+                    }"
+                  />
+                </div>
+
+                <div
+                  class="flex items-baseline solare-serif text-3xl font-bold tracking-tight w-16 flex-shrink-0"
+                  :class="{
+                    'text-[#f5d580]': p.rank === 1,
+                    'text-slate-200': p.rank === 2,
+                    'text-[#ffb59c]': p.rank === 3,
+                  }"
+                >
+                  {{ p.rank
+                  }}<span class="text-base uppercase ml-0.5">{{
+                    p.ordinalSuffix
+                  }}</span>
+                </div>
+
+                <div
+                  class="relative h-20 w-32 overflow-hidden flex-shrink-0 -my-2 flex items-center justify-center art-slice-mask"
+                >
+                  <img
+                    v-if="p.matchSlotUrl"
+                    :src="p.matchSlotUrl"
+                    :alt="p.className"
+                    class="w-full h-full object-cover object-top"
+                  />
+                </div>
+
+                <img
+                  v-if="p.branchIconUrl"
+                  :src="p.branchIconUrl"
+                  :alt="p.branchName"
+                  class="w-5 h-6 object-contain ml-1 flex-shrink-0"
+                  :class="
+                    p.branchName === 'Succession'
+                      ? 'drop-shadow-[0_0_6px_rgba(100,180,255,0.6)]'
+                      : 'drop-shadow-[0_0_6px_rgba(255,100,100,0.7)]'
+                  "
+                />
+
+                <div class="flex flex-col ml-1 min-w-0">
+                  <NuxtLink
+                    :to="`/solare/player/${selectedRegion.toLowerCase()}/${encodeURIComponent(p.user_nickname)}`"
+                    class="solare-serif text-base font-bold text-white hover:text-[#f2ca50] tracking-wide truncate transition-colors"
+                    @click.stop
+                  >
+                    {{ p.user_nickname }}
+                  </NuxtLink>
+                  <span
+                    class="text-xs truncate"
+                    :class="{
+                      'text-amber-200/80': p.rank === 1,
+                      'text-slate-300/80': p.rank === 2,
+                      'text-[#ffb59c]/80': p.rank === 3,
+                    }"
+                  >
+                    [{{ p.branchName }}]{{ p.className }}
+                  </span>
+                </div>
+              </div>
+
+              <div
+                class="col-span-2 flex items-center justify-center z-10 whitespace-nowrap"
+              >
+                <span class="rating-num text-sm text-[#e3e2e6] font-medium">
+                  {{ p.formattedWinrate }}%
+                </span>
+              </div>
+
+              <div
+                class="col-span-2 text-center rating-num text-sm text-[#e3e2e6] z-10 whitespace-nowrap"
+              >
+                {{ p.wins }} / {{ p.draws }} / {{ p.losses }}
+              </div>
+
+              <div
+                class="col-span-2 flex items-center justify-center gap-1 font-mono text-sm z-10 whitespace-nowrap"
+              >
+                <template
+                  v-for="(slot, sIdx) in p.recentMatchSlots"
+                  :key="sIdx"
+                >
+                  <span
+                    v-if="slot === true"
+                    class="text-sky-400 font-bold text-2xl leading-none -translate-y-[0.5px]"
+                    >○</span
+                  >
+                  <span
+                    v-else-if="slot === false"
+                    class="text-red-400 font-bold leading-none"
+                    >✕</span
+                  >
+                  <span v-else class="text-slate-600 font-bold leading-none"
+                    >-</span
+                  >
+                  <span v-if="sIdx < 4" class="text-[#99907c] text-xs">/</span>
+                </template>
+              </div>
+
+              <div
+                class="col-span-1 text-right solare-serif text-2xl font-bold text-[#f2ca50] tracking-wider pr-2 z-10 whitespace-nowrap"
+              >
+                {{ p.rank_rating ?? "—" }}
+              </div>
+            </div>
+
+            <!-- STANDARD ROWS (RANKS 4+) -->
+            <div
+              v-if="standardPlayers.length > 0"
+              class="flex flex-col gap-1 mt-1"
+            >
+              <div
+                v-for="(p, idx) in standardPlayers"
+                :key="`row-${selectedRegion}-${p.user_no || p.user_nickname}`"
+                class="grid grid-cols-12 items-center px-4 py-2 hover:bg-[#23252a] border border-[#2d2f36] transition-colors select-none cursor-pointer"
+                :class="idx % 2 === 0 ? 'bg-[#1b1c20]' : 'bg-[#17181c]'"
+                @click="goToPlayer(p.user_nickname)"
+              >
+                <div class="col-span-5 flex items-center gap-2.5 min-w-0">
+                  <div
+                    class="w-12 h-12 flex items-center justify-center flex-shrink-0"
+                    :title="p.tierInfo?.name"
+                  >
+                    <img
+                      v-if="p.tierBadgeUrl"
+                      :src="p.tierBadgeUrl"
+                      :alt="p.tierInfo?.name || 'Solare Rank Medal'"
+                      class="w-11 h-11 object-contain drop-shadow-[0_0_6px_rgba(189,199,218,0.4)]"
+                    />
+                  </div>
+
+                  <div
+                    class="flex items-baseline text-white rating-num text-sm font-semibold w-12 flex-shrink-0"
+                  >
+                    {{ p.rank
+                    }}<span
+                      class="text-[11px] uppercase ml-0.5 text-slate-400"
+                      >{{ p.ordinalSuffix }}</span
                     >
-                      #{{ p.rank }}
+                  </div>
+
+                  <div
+                    class="w-28 h-10 overflow-hidden flex-shrink-0 flex items-center art-slice-mask"
+                  >
+                    <img
+                      v-if="p.matchSlotUrl"
+                      :src="p.matchSlotUrl"
+                      :alt="p.className"
+                      class="w-full h-full object-cover object-top"
+                    />
+                  </div>
+
+                  <img
+                    v-if="p.branchIconUrl"
+                    :src="p.branchIconUrl"
+                    :alt="p.branchName"
+                    class="w-4 h-5 object-contain ml-1 flex-shrink-0"
+                    :class="
+                      p.branchName === 'Succession'
+                        ? 'drop-shadow-[0_0_6px_rgba(100,180,255,0.6)]'
+                        : 'drop-shadow-[0_0_6px_rgba(255,100,100,0.7)]'
+                    "
+                  />
+
+                  <div class="flex flex-col min-w-0">
+                    <NuxtLink
+                      :to="`/solare/player/${selectedRegion.toLowerCase()}/${encodeURIComponent(p.user_nickname)}`"
+                      class="solare-serif text-sm font-semibold text-white hover:text-[#f2ca50] truncate transition-colors"
+                      @click.stop
+                    >
+                      {{ p.user_nickname }}
+                    </NuxtLink>
+                    <span class="text-[11px] text-slate-400 truncate">
+                      [{{ p.branchName }}]{{ p.className }}
                     </span>
-                  </td>
+                  </div>
+                </div>
 
-                  <td>
-                    <div class="flex items-center gap-3">
-                      <img
-                        v-if="p.avatarUrl"
-                        :src="p.avatarUrl"
-                        :alt="p.className"
-                        class="w-9 h-9 rounded-full border border-[#34353c] bg-[#1c1d22] object-cover shrink-0"
-                      />
-                      <NuxtLink
-                        :to="`/solare/player/${selectedRegion.toLowerCase()}/${encodeURIComponent(p.user_nickname)}`"
-                        class="font-semibold text-[14px] text-[#f1e6cf] hover:text-[#d4af6a] transition"
-                        @click.stop
-                      >
-                        {{ p.user_nickname }}
-                      </NuxtLink>
-                    </div>
-                  </td>
+                <div
+                  class="col-span-2 flex items-center justify-center whitespace-nowrap"
+                >
+                  <span class="rating-num text-xs text-[#e3e2e6]">
+                    {{ p.formattedWinrate }}%
+                  </span>
+                </div>
 
-                  <td>
-                    <div class="flex items-center gap-2">
-                      <img
-                        v-if="p.branchIconUrl"
-                        :src="p.branchIconUrl"
-                        :alt="p.branchName"
-                        class="w-4 h-4 object-contain shrink-0"
-                      />
-                      <img
-                        v-if="p.classIconUrl"
-                        :src="p.classIconUrl"
-                        :alt="p.className"
-                        class="w-4 h-4 object-contain opacity-75 shrink-0"
-                      />
-                      <span class="text-[13px] text-[#ece7df]">
-                        {{ p.className }}
-                      </span>
-                      <span class="text-[#4a4b52]">•</span>
-                      <span class="text-xs text-[#d4af6a]">
-                        {{ p.branchName }}
-                      </span>
-                    </div>
-                  </td>
+                <div
+                  class="col-span-2 text-center rating-num text-xs text-[#e3e2e6] whitespace-nowrap"
+                >
+                  {{ p.wins }} / {{ p.draws }} / {{ p.losses }}
+                </div>
 
-                  <td class="text-center font-mono text-[13px] text-[#c8c1b7]">
-                    {{ p.total_games }}
-                  </td>
+                <div
+                  class="col-span-2 flex items-center justify-center gap-1 font-mono text-xs whitespace-nowrap"
+                >
+                  <template
+                    v-for="(slot, sIdx) in p.recentMatchSlots"
+                    :key="sIdx"
+                  >
+                    <span
+                      v-if="slot === true"
+                      class="text-sky-400 font-bold text-[22px] leading-none -translate-y-[0.5px]"
+                      >○</span
+                    >
+                    <span
+                      v-else-if="slot === false"
+                      class="text-red-400 font-bold leading-none"
+                      >✕</span
+                    >
+                    <span v-else class="text-slate-600 font-bold leading-none"
+                      >-</span
+                    >
+                    <span v-if="sIdx < 4" class="text-[#99907c] text-[10px]"
+                      >/</span
+                    >
+                  </template>
+                </div>
 
-                  <td class="text-center font-mono text-[13px]">
-                    <span class="text-[#5ca3ff] font-semibold">
-                      {{ p.wins }}W
-                    </span>
-                    <span class="text-[#4a4b52] mx-1">-</span>
-                    <span class="text-[#ec6a5e] font-semibold">
-                      {{ p.losses }}L
-                    </span>
-                  </td>
-
-                  <td class="text-right">
-                    <div class="flex items-center justify-end gap-3">
-                      <div
-                        class="w-20 h-1.5 rounded bg-[#24252b] overflow-hidden hidden sm:block"
-                      >
-                        <div
-                          class="h-full rounded"
-                          :style="{
-                            width: `${Math.min(100, Math.max(0, p.winrate))}%`,
-                            background: getWinrateColor(p.winrate),
-                          }"
-                        />
-                      </div>
-                      <span
-                        class="font-mono text-[13px] font-semibold w-12 text-right"
-                        :style="{ color: getWinrateColor(p.winrate) }"
-                      >
-                        {{ p.winrate.toFixed(1) }}%
-                      </span>
-                    </div>
-                  </td>
-                </tr>
-              </tbody>
-            </table>
+                <div
+                  class="col-span-1 text-right solare-serif text-lg font-bold text-[#f2ca50] pr-2 whitespace-nowrap"
+                >
+                  {{ p.rank_rating ?? "—" }}
+                </div>
+              </div>
+            </div>
           </div>
         </div>
       </section>
-    </div>
+    </main>
   </div>
 </template>
 
@@ -264,7 +491,9 @@ import {
   getSkillBranch,
   getClassAvatar,
   getClassIcon,
+  getClassMatchSlot,
   getSkillBranchIcon,
+  getTierInfo,
 } from "~/utils/solareTier.js";
 
 const route = useRoute();
@@ -325,22 +554,80 @@ const classOptions = Object.entries(BDO_CLASSES)
   .map(([id, name]) => ({ id: Number(id), name }))
   .sort((a, b) => a.name.localeCompare(b.name));
 
-function getWinrateColor(wr) {
-  const num = Number(wr) || 0;
-  if (num >= 60) return "#35c48b";
-  if (num >= 50) return "#c8c1b7";
-  return "#ec6a5e";
+function getOrdinalSuffix(rank) {
+  const n = Math.abs(Number(rank)) || 0;
+  const mod100 = n % 100;
+  if (mod100 >= 11 && mod100 <= 13) return "th";
+  switch (n % 10) {
+    case 1:
+      return "st";
+    case 2:
+      return "nd";
+    case 3:
+      return "rd";
+    default:
+      return "th";
+  }
+}
+
+function buildRecentMatchSlots(recentMatches) {
+  const arr = Array.isArray(recentMatches) ? recentMatches.slice(0, 5) : [];
+  return Array.from({ length: 5 }, (_, idx) =>
+    idx < arr.length ? Boolean(arr[idx]) : null,
+  );
+}
+
+function getPodiumBackgroundStyle(rank) {
+  if (rank === 1) {
+    return {
+      background:
+        "linear-gradient(90deg, #382818 0%, #634524 35%, #2a1e14 75%, #18191d 100%)",
+    };
+  }
+  if (rank === 2) {
+    return {
+      background:
+        "linear-gradient(90deg, #1b232e 0%, #2c3a4f 35%, #18202c 75%, #13151a 100%)",
+    };
+  }
+  return {
+    background:
+      "linear-gradient(90deg, #241913 0%, #442a1d 35%, #231610 75%, #131418 100%)",
+  };
 }
 
 const decoratedRankingPlayers = computed(() =>
-  rankingPlayers.value.map((p) => ({
-    ...p,
-    className: getClassName(p.class_type),
-    branchName: getSkillBranch(p.class_type, p.skill_branch_type),
-    avatarUrl: getClassAvatar(p.class_type),
-    classIconUrl: getClassIcon(p.class_type),
-    branchIconUrl: getSkillBranchIcon(p.class_type, p.skill_branch_type),
-  })),
+  rankingPlayers.value.map((p) => {
+    const totalGames = Number(p.total_games || 0);
+    const wins = Number(p.wins || 0);
+    const formattedWinrate =
+      totalGames > 0
+        ? ((wins / totalGames) * 100).toFixed(2)
+        : Number(p.winrate || 0).toFixed(2);
+    const tierInfo = getTierInfo(
+      p.rank_rating !== null && p.rank_rating !== undefined
+        ? p.rank_rating
+        : p.rank <= 100
+          ? 1850
+          : 0,
+      p.rank,
+    );
+
+    return {
+      ...p,
+      className: getClassName(p.class_type),
+      branchName: getSkillBranch(p.class_type, p.skill_branch_type),
+      avatarUrl: getClassAvatar(p.class_type),
+      classIconUrl: getClassIcon(p.class_type),
+      matchSlotUrl: getClassMatchSlot(p.class_type),
+      branchIconUrl: getSkillBranchIcon(p.class_type, p.skill_branch_type),
+      tierInfo,
+      tierBadgeUrl: tierInfo?.badge_url || null,
+      ordinalSuffix: getOrdinalSuffix(p.rank),
+      formattedWinrate,
+      recentMatchSlots: buildRecentMatchSlots(p.recent_matches),
+    };
+  }),
 );
 
 const filteredRankingPlayers = computed(() => {
@@ -352,6 +639,14 @@ const filteredRankingPlayers = computed(() => {
       p.className.toLowerCase().includes(q),
   );
 });
+
+const podiumPlayers = computed(() =>
+  filteredRankingPlayers.value.filter((p) => p.rank >= 1 && p.rank <= 3),
+);
+
+const standardPlayers = computed(() =>
+  filteredRankingPlayers.value.filter((p) => !(p.rank >= 1 && p.rank <= 3)),
+);
 
 async function fetchRanking() {
   isLoadingRanking.value = true;
@@ -438,266 +733,46 @@ onMounted(() => {
 <style scoped>
 .solare-home-page {
   min-height: calc(100vh - 4.5rem);
-  background: #101114;
-  color: #ece7df;
-  font-family: "IBM Plex Sans", system-ui, sans-serif;
-  padding: 24px 16px 64px;
+  background: #0c0d10;
+  color: #e3e2e6;
+  font-family:
+    "Plus Jakarta Sans",
+    "IBM Plex Sans",
+    system-ui,
+    -apple-system,
+    sans-serif;
   -webkit-font-smoothing: antialiased;
 }
 
-.solare-home-container {
-  max-width: 1320px;
-  margin: 0 auto;
-  display: flex;
-  flex-direction: column;
-  gap: 24px;
-}
-
-.solare-home-topbar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  flex-wrap: wrap;
-}
-
-.solare-live-dot {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background: #35c48b;
-  box-shadow: 0 0 8px rgba(53, 196, 139, 0.6);
-}
-
-.solare-overlay-cta {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 12px;
-  font-weight: 600;
-  color: #d4af6a;
-  background: #221d15;
-  border: 1px solid #5a4a2c;
-  border-radius: 8px;
-  padding: 8px 14px;
-  text-decoration: none;
-  transition: all 0.15s ease;
-}
-
-.solare-overlay-cta:hover {
-  background: #2d261b;
-  border-color: #d4af6a;
-}
-
-.solare-hero-card {
-  background: #16171b;
-  border: 1px solid #26272c;
-  border-radius: 12px;
-  padding: 32px 24px;
-  display: flex;
-  flex-direction: column;
-  gap: 22px;
-}
-
-.solare-hero-title {
-  margin: 0;
+.solare-serif {
   font-family: "Cinzel", serif;
-  font-weight: 700;
-  font-size: clamp(24px, 3.2vw, 36px);
-  letter-spacing: 0.05em;
-  color: #f1e6cf;
 }
 
-.solare-search-box {
-  max-width: 820px;
-  width: 100%;
-  margin: 0 auto;
-  background: #111216;
-  border: 1px solid #2a2b31;
-  border-radius: 10px;
-  padding: 12px 14px;
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
+.rating-num {
+  font-feature-settings: "tnum" 1;
 }
 
-.solare-region-strip {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  flex-wrap: wrap;
+.podium-rank-1 {
+  box-shadow:
+    0 0 35px -5px rgba(212, 175, 55, 0.25),
+    inset 0 1px 0 rgba(229, 193, 115, 0.4);
 }
 
-.solare-region-btn {
-  border: 1px solid #26272c;
-  background: #16171b;
-  color: #9a9aa3;
-  border-radius: 5px;
-  padding: 4px 10px;
-  font:
-    600 11px "JetBrains Mono",
-    monospace;
-  cursor: pointer;
-  transition: all 0.15s ease;
-}
-
-.solare-region-btn:hover {
-  color: #ece7df;
-  border-color: #3a3b42;
-}
-
-.solare-region-btn--active {
-  background: #d4af6a;
-  border-color: #d4af6a;
-  color: #1a1610;
-}
-
-.solare-hero-form {
-  display: flex;
-  align-items: center;
-  background: #16171b;
-  border: 1px solid #2e3039;
-  border-radius: 8px;
-  height: 44px;
-  overflow: hidden;
-}
-
-.solare-hero-input {
-  flex: 1;
-  min-width: 0;
-  background: transparent;
-  border: none;
-  outline: none;
-  color: #ece7df;
-  font-size: 14px;
-  padding: 0 12px;
-}
-
-.solare-hero-submit {
-  height: 100%;
-  border: none;
-  background: #d4af6a;
-  color: #1a1610;
-  font:
-    700 12px "IBM Plex Sans",
-    sans-serif;
-  letter-spacing: 0.08em;
-  padding: 0 24px;
-  cursor: pointer;
-  transition: background 0.15s ease;
-}
-
-.solare-hero-submit:hover {
-  background: #e2c07e;
-}
-
-/* RANKING SECTION */
-.solare-ranking-section {
-  display: flex;
-  flex-direction: column;
-  gap: 14px;
-}
-
-.solare-ranking-header {
-  display: flex;
-  align-items: flex-end;
-  justify-content: space-between;
-  gap: 16px;
-  flex-wrap: wrap;
-}
-
-.solare-ranking-title {
-  margin: 0;
-  font-family: "Cinzel", serif;
-  font-weight: 700;
-  font-size: 20px;
-  letter-spacing: 0.04em;
-  color: #f1e6cf;
-}
-
-.solare-filter-select,
-.solare-filter-input {
-  height: 36px;
-  background: #16171b;
-  border: 1px solid #26272c;
-  border-radius: 8px;
-  color: #ece7df;
-  font-size: 13px;
-  padding: 0 12px;
-  outline: none;
-}
-
-.solare-filter-select:focus,
-.solare-filter-input:focus {
-  border-color: #d4af6a;
-}
-
-.solare-ranking-card {
-  background: #16171b;
-  border: 1px solid #26272c;
-  border-radius: 10px;
-  overflow: hidden;
-}
-
-.solare-ranking-table {
-  width: 100%;
-  border-collapse: collapse;
-}
-
-.solare-ranking-table thead tr {
-  border-bottom: 1px solid #26272c;
-  background: #131418;
-}
-
-.solare-ranking-table th {
-  padding: 12px 16px;
-  font-size: 11px;
-  font-weight: 600;
-  letter-spacing: 0.07em;
-  color: #7d7e86;
-  white-space: nowrap;
-}
-
-.solare-ranking-row {
-  border-bottom: 1px solid #1e2026;
-  cursor: pointer;
-  transition: background 0.12s ease;
-}
-
-.solare-ranking-row:hover {
-  background: #1b1d23;
-}
-
-.solare-ranking-row td {
-  padding: 10px 16px;
-  white-space: nowrap;
-}
-
-.solare-rank-pill {
-  display: inline-block;
-  padding: 2px 8px;
-  border-radius: 4px;
-  font-size: 12px;
-  font-weight: 600;
-  color: #9a9aa3;
-}
-
-.solare-rank-pill--1 {
-  background: rgba(212, 175, 106, 0.18);
-  color: #d4af6a;
-  border: 1px solid #6a5631;
-}
-
-.solare-rank-pill--2 {
-  background: rgba(200, 193, 183, 0.14);
-  color: #e2ddd5;
-  border: 1px solid #524f4a;
-}
-
-.solare-rank-pill--3 {
-  background: rgba(186, 123, 79, 0.16);
-  color: #d89566;
-  border: 1px solid #6b462d;
+.art-slice-mask {
+  mask-image: linear-gradient(
+    to right,
+    transparent 0%,
+    black 18%,
+    black 82%,
+    transparent 100%
+  );
+  -webkit-mask-image: linear-gradient(
+    to right,
+    transparent 0%,
+    black 18%,
+    black 82%,
+    transparent 100%
+  );
 }
 
 .solare-spinner {
@@ -705,7 +780,7 @@ onMounted(() => {
   height: 28px;
   border-radius: 50%;
   border: 2px solid #2e3039;
-  border-top-color: #d4af6a;
+  border-top-color: #d4af37;
   animation: spin 0.8s linear infinite;
 }
 

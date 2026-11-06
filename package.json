@@ -27,6 +27,7 @@
     "db:save-seed": "node infra/scripts/save-seed.js",
     "user:admin": "node infra/scripts/grant-admin.js",
     "solare:seed": "node --env-file=.env infra/scripts/seed-solare.js",
+    "solare:seed-anchors": "node --env-file=.env infra/scripts/seed-solare-rating-anchors.js",
     "solare:win": "node --env-file=.env infra/scripts/seed-solare.js --match",
     "solare:loss": "node --env-file=.env infra/scripts/seed-solare.js --match --loss"
   },

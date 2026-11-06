@@ -146,6 +146,11 @@ async function createSolarePlayer(playerObject = {}) {
     draw_count: 0,
     win_average: "59.34%",
     download_count: 3,
+    rank_rating: null,
+    rating_anchor_record_no: null,
+    rating_achieved_record_no: null,
+    rating_achieved_at: null,
+    last_decay_at: null,
   };
 
   const p = {
@@ -158,8 +163,10 @@ async function createSolarePlayer(playerObject = {}) {
       INSERT INTO solare_players (
         region, season, user_no, user_nickname, current_ranking, class_type,
         skill_branch_type, win_count, lose_count, draw_count,
-        win_average, download_count, last_seen_at, updated_at
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, NOW(), NOW())
+        win_average, download_count, rank_rating, rating_anchor_record_no,
+        rating_achieved_record_no, rating_achieved_at, last_decay_at,
+        last_seen_at, updated_at
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, NOW(), NOW())
       ON CONFLICT (region, user_no) DO UPDATE SET
         season = EXCLUDED.season,
         user_nickname = EXCLUDED.user_nickname,
@@ -171,6 +178,11 @@ async function createSolarePlayer(playerObject = {}) {
         draw_count = EXCLUDED.draw_count,
         win_average = EXCLUDED.win_average,
         download_count = EXCLUDED.download_count,
+        rank_rating = EXCLUDED.rank_rating,
+        rating_anchor_record_no = EXCLUDED.rating_anchor_record_no,
+        rating_achieved_record_no = EXCLUDED.rating_achieved_record_no,
+        rating_achieved_at = EXCLUDED.rating_achieved_at,
+        last_decay_at = EXCLUDED.last_decay_at,
         last_seen_at = NOW(),
         updated_at = NOW()
       RETURNING *;
@@ -188,6 +200,11 @@ async function createSolarePlayer(playerObject = {}) {
       p.draw_count,
       p.win_average,
       p.download_count,
+      p.rank_rating,
+      p.rating_anchor_record_no,
+      p.rating_achieved_record_no,
+      p.rating_achieved_at,
+      p.last_decay_at,
     ],
   });
 

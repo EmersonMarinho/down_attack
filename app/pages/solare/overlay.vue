@@ -510,6 +510,20 @@
                       </span>
                       (or customize your baseline below).
                     </template>
+                    <template
+                      v-else-if="
+                        searchStatus === 'found' &&
+                        activePlayerData.rating !== null &&
+                        activePlayerData.rating !== undefined
+                      "
+                    >
+                      Official leaderboard rating detected:
+                      <span class="font-mono font-bold text-[#dfcaa2]">
+                        {{ activePlayerData.rating }} PTS
+                      </span>
+                      was automatically loaded. You can start your session
+                      immediately or customize your baseline below!
+                    </template>
                     <template v-else>
                       Enter your current in-game Arena of Solare rating (PTS)
                       below. On future streams, your ending rating will be
@@ -1554,6 +1568,8 @@ async function handleSearchPlayer() {
 
     if (body.rating !== null && body.rating !== undefined) {
       startingRatingInput.value = Number(body.rating);
+    } else {
+      startingRatingInput.value = null;
     }
     saveStateToStorage();
   } catch {
@@ -1582,8 +1598,11 @@ async function handleStartOrResetSession() {
     rawRating !== undefined &&
     String(rawRating).trim() !== "" &&
     !Number.isNaN(Number(rawRating));
+  const hasServerRating =
+    livePlayerData.value?.rating !== null &&
+    livePlayerData.value?.rating !== undefined;
 
-  if (!hasExplicitRating && !sessionToken.value) {
+  if (!hasExplicitRating && !sessionToken.value && !hasServerRating) {
     sessionFeedbackIsError.value = true;
     sessionFeedbackMessage.value =
       "Please enter your current in-game Starting Rating (PTS) above before starting a session.";
