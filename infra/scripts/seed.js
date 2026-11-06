@@ -5,6 +5,7 @@ import dotenv from "dotenv";
 import dotenvExpand from "dotenv-expand";
 import { runner } from "node-pg-migrate";
 import database from "../database.js";
+import { seedSolareRatingAnchors } from "./seed-solare-rating-anchors.js";
 
 if (fs.existsSync(".env")) {
   dotenvExpand.expand(dotenv.config());
@@ -285,6 +286,11 @@ async function runSeed() {
         [JSON.stringify(presetsData)],
       );
     }
+
+    await seedSolareRatingAnchors({
+      client,
+      force: false,
+    });
 
     await client.query("COMMIT;");
 
