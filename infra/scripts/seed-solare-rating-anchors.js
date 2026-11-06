@@ -111,7 +111,7 @@ export async function seedSolareRatingAnchors(options = {}) {
 
     const bulkRes = await client.query({
       text: `
-        WITH input_anchors AS (
+        WITH deduped_anchors AS (
           SELECT DISTINCT ON (UPPER(a.region), LOWER(a.user_nickname))
             UPPER(a.region) AS region,
             a.user_nickname,
@@ -134,6 +134,15 @@ export async function seedSolareRatingAnchors(options = {}) {
             LOWER(a.user_nickname),
             a.rank_rating DESC
         ),
+        input_anchors AS (
+          SELECT
+            da.*,
+            ROW_NUMBER() OVER (
+              PARTITION BY da.region
+              ORDER BY da.rank_rating DESC, LOWER(da.user_nickname) ASC
+            )::int AS anchor_region_rank
+          FROM deduped_anchors da
+        ),
         matched_players AS (
           SELECT DISTINCT ON (sp.region, sp.user_no)
             sp.region,
@@ -148,7 +157,8 @@ export async function seedSolareRatingAnchors(options = {}) {
             ia.anchor_record_no AS explicit_anchor_record_no,
             ia.anchor_wins,
             ia.anchor_losses,
-            ia.anchor_draws
+            ia.anchor_draws,
+            ia.anchor_region_rank
           FROM input_anchors ia
           INNER JOIN solare_players sp
             ON sp.region = ia.region
@@ -201,8 +211,25 @@ export async function seedSolareRatingAnchors(options = {}) {
             WITH ranked_matches AS (
               SELECT
                 smp.record_no,
+                smp.class_type,
+                smp.is_winner,
                 smp.vary_rank_rating,
-                COALESCE(sm.match_date, sm.crawled_at, smp.created_at) AS match_at
+                COALESCE(sm.match_date, sm.crawled_at, smp.created_at) AS match_at,
+                ROW_NUMBER() OVER (ORDER BY smp.record_no DESC) AS rn_desc,
+                COUNT(*) FILTER (WHERE smp.is_winner = true) OVER (
+                  PARTITION BY smp.class_type
+                  ORDER BY smp.record_no ASC
+                )::int AS cum_cls_wins,
+                COUNT(*) FILTER (WHERE smp.is_winner = false) OVER (
+                  PARTITION BY smp.class_type
+                  ORDER BY smp.record_no ASC
+                )::int AS cum_cls_losses,
+                COUNT(*) FILTER (WHERE smp.is_winner = true) OVER (
+                  PARTITION BY smp.class_type
+                )::int AS total_cls_wins,
+                COUNT(*) FILTER (WHERE smp.is_winner = false) OVER (
+                  PARTITION BY smp.class_type
+                )::int AS total_cls_losses
               FROM solare_match_players smp
               LEFT JOIN solare_matches sm
                 ON sm.region = smp.region AND sm.record_no = smp.record_no
@@ -213,44 +240,88 @@ export async function seedSolareRatingAnchors(options = {}) {
                 )
                 AND smp.vary_rank_rating IS NOT NULL
                 AND smp.vary_rank_rating <> 0
+            ),
+            inferred_extra AS (
+              SELECT
+                GREATEST(
+                  0,
+                  CASE
+                    WHEN mp.explicit_anchor_record_no IS NOT NULL THEN
+                      (
+                        SELECT COUNT(*)::int
+                        FROM ranked_matches rm
+                        WHERE rm.record_no > mp.explicit_anchor_record_no
+                      )
+                    WHEN mp.anchor_wins IS NOT NULL
+                      AND mp.anchor_losses IS NOT NULL
+                      AND mp.anchor_region_rank <= 100
+                      AND COALESCE(mp.db_wins, 0) >= mp.anchor_wins
+                      AND (COALESCE(mp.db_losses, 0) + COALESCE(mp.db_draws, 0)) >= (mp.anchor_losses + mp.anchor_draws) THEN
+                      (COALESCE(mp.db_wins, 0) - mp.anchor_wins) +
+                      ((COALESCE(mp.db_losses, 0) + COALESCE(mp.db_draws, 0)) - (mp.anchor_losses + mp.anchor_draws))
+                    WHEN mp.anchor_wins IS NOT NULL
+                      AND mp.anchor_losses IS NOT NULL
+                      AND mp.anchor_region_rank > 100 THEN
+                      COALESCE(
+                        (
+                          SELECT
+                            (rm.total_cls_wins - mp.anchor_wins) +
+                            (rm.total_cls_losses - (mp.anchor_losses + mp.anchor_draws))
+                          FROM ranked_matches rm
+                          WHERE rm.cum_cls_wins = mp.anchor_wins
+                            AND rm.cum_cls_losses = (mp.anchor_losses + mp.anchor_draws)
+                            AND rm.total_cls_wins >= mp.anchor_wins
+                            AND rm.total_cls_losses >= (mp.anchor_losses + mp.anchor_draws)
+                          ORDER BY rm.record_no DESC
+                          LIMIT 1
+                        ),
+                        0
+                      )
+                    ELSE 0
+                  END
+                )::int AS extra_games_count
+            ),
+            anchor_point AS (
+              SELECT
+                ie.extra_games_count,
+                COALESCE(
+                  mp.explicit_anchor_record_no,
+                  CASE
+                    WHEN ie.extra_games_count > 0 THEN
+                      (
+                        SELECT rm.record_no
+                        FROM ranked_matches rm
+                        WHERE rm.rn_desc = ie.extra_games_count + 1
+                        LIMIT 1
+                      )
+                    ELSE
+                      (SELECT MAX(rm.record_no) FROM ranked_matches rm)
+                  END,
+                  0
+                )::bigint AS base_record_no,
+                (SELECT COUNT(*)::int FROM ranked_matches) AS total_matches
+              FROM inferred_extra ie
             )
             SELECT
               (SELECT MAX(rm.record_no)::bigint FROM ranked_matches rm) AS latest_record_no,
-              CASE
-                WHEN mp.explicit_anchor_record_no IS NOT NULL THEN
-                  COALESCE(
-                    (
-                      SELECT COUNT(*)::int
-                      FROM ranked_matches rm
-                      WHERE rm.record_no > mp.explicit_anchor_record_no
-                    ),
-                    0
-                  )
-                ELSE 0
-              END AS extra_games_count,
-              CASE
-                WHEN mp.explicit_anchor_record_no IS NOT NULL THEN
-                  COALESCE(
-                    (
-                      SELECT SUM(rm.vary_rank_rating)::int
-                      FROM ranked_matches rm
-                      WHERE rm.record_no > mp.explicit_anchor_record_no
-                    ),
-                    0
-                  )
-                ELSE 0
-              END AS post_anchor_delta_sum,
+              (SELECT ap.extra_games_count FROM anchor_point ap) AS extra_games_count,
               COALESCE(
-                CASE
-                  WHEN mp.explicit_anchor_record_no IS NOT NULL THEN
-                    (
-                      SELECT MAX(rm.record_no)::bigint
-                      FROM ranked_matches rm
-                      WHERE rm.record_no > mp.explicit_anchor_record_no
-                    )
-                  ELSE NULL
-                END,
-                mp.explicit_anchor_record_no,
+                (
+                  SELECT SUM(rm.vary_rank_rating)::int
+                  FROM ranked_matches rm, anchor_point ap
+                  WHERE ap.total_matches > 0
+                    AND rm.record_no > ap.base_record_no
+                ),
+                0
+              ) AS post_anchor_delta_sum,
+              COALESCE(
+                (
+                  SELECT MAX(rm.record_no)::bigint
+                  FROM ranked_matches rm, anchor_point ap
+                  WHERE ap.total_matches > 0
+                    AND rm.record_no > ap.base_record_no
+                ),
+                (SELECT NULLIF(ap.base_record_no, 0) FROM anchor_point ap),
                 (SELECT MAX(rm.record_no)::bigint FROM ranked_matches rm)
               ) AS achieved_record_no,
               (
