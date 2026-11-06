@@ -193,6 +193,27 @@
                 }}
               </span>
             </div>
+            <div
+              v-if="
+                profile.rank_rating !== null &&
+                profile.rank_rating !== undefined
+              "
+              class="solare-header-stat-item"
+            >
+              <span class="solare-header-stat-label">RATING</span>
+              <span
+                class="solare-header-stat-value font-mono text-[#f1e6cf] inline-flex items-center gap-1.5"
+                :title="profileTierInfo?.name"
+              >
+                <img
+                  v-if="profileTierInfo?.badge_url"
+                  :src="profileTierInfo.badge_url"
+                  :alt="profileTierInfo.name"
+                  class="w-5 h-5 object-contain shrink-0"
+                />
+                <span>{{ profile.rank_rating }} PTS</span>
+              </span>
+            </div>
             <div class="solare-header-stat-item">
               <span class="solare-header-stat-label">BEST WIN STREAK</span>
               <span
@@ -1100,6 +1121,7 @@ import {
   getClassMatchSlot,
   getClassIcon,
   getSkillBranchIcon,
+  getTierInfo,
 } from "~/utils/solareTier.js";
 
 const route = useRoute();
@@ -1220,6 +1242,20 @@ const primaryBranchIcon = computed(() =>
     profile.value?.skill_branch_type,
   ),
 );
+
+const profileTierInfo = computed(() => {
+  if (
+    !profile.value ||
+    profile.value.rank_rating === null ||
+    profile.value.rank_rating === undefined
+  ) {
+    return null;
+  }
+  return getTierInfo(
+    profile.value.rank_rating,
+    profile.value.current_ranking ?? 999,
+  );
+});
 
 const lastMatchStatusText = computed(() => {
   const firstMatch = loadedMatches.value[0];
