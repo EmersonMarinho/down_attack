@@ -1,4 +1,5 @@
 import { computeMatchModeProofs } from "~~/server/utils/solareMatchModeProof.js";
+import solare from "~~/server/utils/solare.js";
 
 describe("server/utils/solareMatchModeProof.js", () => {
   describe(".computeMatchModeProofs()", () => {
@@ -643,6 +644,445 @@ describe("server/utils/solareMatchModeProof.js", () => {
 
       expect(proofs.size).toBe(0);
       expect(stats.rejectedPractice).toBe(1);
+    });
+
+    test("proves Practice via checkpoint_wl_delta for veterans missing early-season history without false contradiction from other missing-history participants", () => {
+      const players = [
+        // Veteran 70: 100W/50L official, only 1 win in DB (missing 99 historical wins -> season excess.w = -99)
+        {
+          user_no: 70,
+          current_ranking: 5,
+          win_count: 100,
+          lose_count: 50,
+          rank_rating: 2150,
+        },
+        // Veteran 71: also in match 8010, 80W/40L official, only 1 win in DB (missing 79 historical wins -> season excess.w = -79)
+        {
+          user_no: 71,
+          current_ranking: 12,
+          win_count: 80,
+          lose_count: 40,
+          rank_rating: 2050,
+        },
+      ];
+
+      const matchRows = [
+        {
+          record_no: 8010,
+          match_date: "2026-11-06T12:10:00.000Z",
+          repz: false,
+          user_no: 70,
+          is_winner: true,
+          vary_rank_rating: 18,
+          has_winner: true,
+        },
+        {
+          record_no: 8010,
+          match_date: "2026-11-06T12:10:00.000Z",
+          repz: false,
+          user_no: 71,
+          is_winner: true,
+          vary_rank_rating: 19,
+          has_winner: true,
+        },
+      ];
+
+      const checkpoints = [
+        {
+          user_no: 70,
+          checkpoint_record_no: 8000,
+          checkpoint_at: "2026-11-06T12:00:00.000Z",
+          win_count: 100,
+          lose_count: 50,
+          draw_count: 0,
+          checkpoint_rating: 2150,
+          checkpoint_rating_is_estimated: false,
+        },
+        {
+          user_no: 70,
+          checkpoint_record_no: 8010,
+          checkpoint_at: "2026-11-06T12:15:00.000Z",
+          win_count: 100,
+          lose_count: 50,
+          draw_count: 0,
+          checkpoint_rating: 2150,
+          checkpoint_rating_is_estimated: false,
+        },
+      ];
+
+      const { proofs, invalidatedPractice, stats } = computeMatchModeProofs({
+        players,
+        matchRows,
+        checkpoints,
+      });
+
+      expect(proofs.get(8010)).toEqual({
+        mode: "practice",
+        method: "checkpoint_wl_delta",
+      });
+      expect(invalidatedPractice.has(8010)).toBe(false);
+      expect(stats.provenPractice).toBe(1);
+      expect(stats.rejectedPractice).toBe(0);
+    });
+
+    test("solves mixed Practice + Ranked windows via checkpoint_math and sanitizes lagged intermediate checkpoints", () => {
+      const players = [
+        {
+          user_no: 80,
+          current_ranking: 1,
+          win_count: 120,
+          lose_count: 40,
+          rank_rating: 2180,
+        },
+        // Veteran 81 (#2, bracket [2170, 2180]): missing 99 early-season wins, played 1 Practice (+18) + 1 Ranked (+26) from 2150 -> 2176
+        {
+          user_no: 81,
+          current_ranking: 2,
+          win_count: 101,
+          lose_count: 50,
+          rank_rating: 2176,
+        },
+        {
+          user_no: 82,
+          current_ranking: 3,
+          win_count: 110,
+          lose_count: 45,
+          rank_rating: 2170,
+        },
+        // Veteran 83: had a cached checkpoint at 9101 (W=50) before GetRankList caught up at 9102 (W=51)
+        {
+          user_no: 83,
+          current_ranking: 20,
+          win_count: 51,
+          lose_count: 20,
+          rank_rating: 1950,
+        },
+      ];
+
+      const matchRows = [
+        {
+          record_no: 9001,
+          match_date: "2026-11-06T13:05:00.000Z",
+          repz: false,
+          user_no: 81,
+          is_winner: true,
+          vary_rank_rating: 18,
+          has_winner: true,
+        },
+        {
+          record_no: 9002,
+          match_date: "2026-11-06T13:12:00.000Z",
+          repz: false,
+          user_no: 81,
+          is_winner: true,
+          vary_rank_rating: 26,
+          has_winner: true,
+        },
+        {
+          record_no: 9101,
+          match_date: "2026-11-06T14:05:00.000Z",
+          repz: false,
+          user_no: 83,
+          is_winner: true,
+          vary_rank_rating: 24,
+          has_winner: true,
+        },
+        {
+          record_no: 9102,
+          match_date: "2026-11-06T14:12:00.000Z",
+          repz: false,
+          user_no: 83,
+          is_winner: false,
+          vary_rank_rating: -15,
+          has_winner: true,
+        },
+      ];
+
+      const checkpoints = [
+        {
+          user_no: 81,
+          checkpoint_record_no: 9000,
+          checkpoint_at: "2026-11-06T13:00:00.000Z",
+          win_count: 100,
+          lose_count: 50,
+          draw_count: 0,
+          checkpoint_rating: 2150,
+          checkpoint_rating_is_estimated: false,
+        },
+        {
+          user_no: 81,
+          checkpoint_record_no: 9002,
+          checkpoint_at: "2026-11-06T13:15:00.000Z",
+          win_count: 101,
+          lose_count: 50,
+          draw_count: 0,
+          checkpoint_rating: 2176,
+          checkpoint_rating_is_estimated: false,
+        },
+        {
+          user_no: 83,
+          checkpoint_record_no: 9100,
+          checkpoint_at: "2026-11-06T14:00:00.000Z",
+          win_count: 50,
+          lose_count: 20,
+          draw_count: 0,
+          checkpoint_rating: 1926,
+          checkpoint_rating_is_estimated: false,
+        },
+        // Stale cached snapshot at 9101 (still showing W=50)
+        {
+          user_no: 83,
+          checkpoint_record_no: 9101,
+          checkpoint_at: "2026-11-06T14:06:00.000Z",
+          win_count: 50,
+          lose_count: 20,
+          draw_count: 0,
+          checkpoint_rating: 1926,
+          checkpoint_rating_is_estimated: false,
+        },
+        // Refreshed snapshot at 9102 (W=51, L=20)
+        {
+          user_no: 83,
+          checkpoint_record_no: 9102,
+          checkpoint_at: "2026-11-06T14:15:00.000Z",
+          win_count: 51,
+          lose_count: 20,
+          draw_count: 0,
+          checkpoint_rating: 1950,
+          checkpoint_rating_is_estimated: false,
+        },
+      ];
+
+      const { proofs } = computeMatchModeProofs({
+        players,
+        matchRows,
+        checkpoints,
+      });
+
+      expect(proofs.get(9001)).toEqual({
+        mode: "practice",
+        method: "checkpoint_math",
+      });
+      expect(proofs.get(9002)).toEqual({
+        mode: "ranked",
+        method: "checkpoint_math",
+      });
+      expect(proofs.has(9101)).toBe(false);
+      expect(proofs.get(9102)).toEqual({
+        mode: "practice",
+        method: "checkpoint_wl_delta",
+      });
+    });
+
+    test("preserves valid Practice proofs when neighbors or provers are temporarily unsynchronized alongside missing-history veterans", () => {
+      // Scenario A: Veteran 81 (missing 99 wins, season excess = -99) has an enclosing interval (9000, 9002]
+      // with rawCounts.w = 2 > d.w = 1, but upper neighbor #1 is temporarily unsynchronized (absent from players).
+      // Scenario B: Unseeded prover 90 is temporarily in unsyncedPlayers while sharing match 9501 with
+      // missing-history veteran 91 (season excess = -49). Neither persisted Practice proof should be invalidated!
+      const players = [
+        {
+          user_no: 81,
+          current_ranking: 2,
+          win_count: 101,
+          lose_count: 50,
+          rank_rating: 2176,
+        },
+        {
+          user_no: 82,
+          current_ranking: 3,
+          win_count: 110,
+          lose_count: 45,
+          rank_rating: 2170,
+        },
+        {
+          user_no: 91,
+          current_ranking: 15,
+          win_count: 50,
+          lose_count: 20,
+          rank_rating: 1900,
+        },
+      ];
+
+      const unsyncedPlayers = [
+        { user_no: 90, user_nickname: "UnsyncedProver" },
+      ];
+
+      const matchRows = [
+        {
+          record_no: 9001,
+          match_date: "2026-11-06T13:05:00.000Z",
+          repz: false,
+          user_no: 81,
+          is_winner: true,
+          vary_rank_rating: 18,
+          has_winner: true,
+        },
+        {
+          record_no: 9002,
+          match_date: "2026-11-06T13:12:00.000Z",
+          repz: false,
+          user_no: 81,
+          is_winner: true,
+          vary_rank_rating: 26,
+          has_winner: true,
+        },
+        {
+          record_no: 9501,
+          match_date: "2026-11-06T15:00:00.000Z",
+          repz: false,
+          user_no: 90,
+          is_winner: true,
+          vary_rank_rating: 58,
+          has_winner: true,
+        },
+        {
+          record_no: 9501,
+          match_date: "2026-11-06T15:00:00.000Z",
+          repz: false,
+          user_no: 91,
+          is_winner: true,
+          vary_rank_rating: 20,
+          has_winner: true,
+        },
+      ];
+
+      const checkpoints = [
+        {
+          user_no: 81,
+          checkpoint_record_no: 9000,
+          checkpoint_at: "2026-11-06T13:00:00.000Z",
+          win_count: 100,
+          lose_count: 50,
+          draw_count: 0,
+          checkpoint_rating: 2150,
+          checkpoint_rating_is_estimated: false,
+        },
+        {
+          user_no: 81,
+          checkpoint_record_no: 9002,
+          checkpoint_at: "2026-11-06T13:15:00.000Z",
+          win_count: 101,
+          lose_count: 50,
+          draw_count: 0,
+          checkpoint_rating: 2176,
+          checkpoint_rating_is_estimated: false,
+        },
+      ];
+
+      const existingProofs = [
+        { record_no: 9001, mode: "practice", method: "checkpoint_math" },
+        { record_no: 9501, mode: "practice", method: "trigger_math" },
+      ];
+
+      const { proofs, invalidatedPractice } = computeMatchModeProofs({
+        players,
+        unsyncedPlayers,
+        matchRows,
+        existingProofs,
+        checkpoints,
+      });
+
+      expect(proofs.has(9001)).toBe(false);
+      expect(proofs.has(9501)).toBe(false);
+      expect(invalidatedPractice.has(9001)).toBe(false);
+      expect(invalidatedPractice.has(9501)).toBe(false);
+    });
+
+    test("invalidates over-excluded persisted Practice proofs on partial snapshot refresh (0 < dW < raw_w)", () => {
+      // Veteran 81 played 2 wins (9001, 9002); cached snapshot at dW=0 marked BOTH as practice.
+      // Snapshot refreshed to dW=1 while upper neighbor #1 is unsynchronized so checkpoint_math cannot run yet.
+      // Keeping both persisted Practice proofs leaves 0 < 1 non-practice wins -> both must be invalidated!
+      const players = [
+        {
+          user_no: 81,
+          current_ranking: 2,
+          win_count: 101,
+          lose_count: 50,
+          rank_rating: 2150,
+        },
+      ];
+
+      const matchRows = [
+        {
+          record_no: 9001,
+          match_date: "2026-11-06T13:05:00.000Z",
+          repz: false,
+          user_no: 81,
+          is_winner: true,
+          vary_rank_rating: 18,
+          has_winner: true,
+        },
+        {
+          record_no: 9002,
+          match_date: "2026-11-06T13:12:00.000Z",
+          repz: false,
+          user_no: 81,
+          is_winner: true,
+          vary_rank_rating: 26,
+          has_winner: true,
+        },
+      ];
+
+      const checkpoints = [
+        {
+          user_no: 81,
+          checkpoint_record_no: 9000,
+          checkpoint_at: "2026-11-06T13:00:00.000Z",
+          win_count: 100,
+          lose_count: 50,
+          draw_count: 0,
+          checkpoint_rating: 2150,
+          checkpoint_rating_is_estimated: false,
+        },
+        {
+          user_no: 81,
+          checkpoint_record_no: 9002,
+          checkpoint_at: "2026-11-06T13:15:00.000Z",
+          win_count: 101,
+          lose_count: 50,
+          draw_count: 0,
+          checkpoint_rating: 2150,
+          checkpoint_rating_is_estimated: false,
+        },
+      ];
+
+      const existingProofs = [
+        { record_no: 9001, mode: "practice", method: "checkpoint_wl_delta" },
+        { record_no: 9002, mode: "practice", method: "checkpoint_wl_delta" },
+      ];
+
+      const { invalidatedPractice } = computeMatchModeProofs({
+        players,
+        matchRows,
+        existingProofs,
+        checkpoints,
+      });
+
+      expect(invalidatedPractice.has(9001)).toBe(true);
+      expect(invalidatedPractice.has(9002)).toBe(true);
+    });
+  });
+
+  describe("solare.verifyCronBearerToken()", () => {
+    test("validates Bearer token against configured secret in constant time", () => {
+      const sampleSecret = "unit-test-cron-maintenance-value";
+
+      expect(solare.verifyCronBearerToken(`Bearer ${sampleSecret}`, "")).toBe(
+        false,
+      );
+      expect(solare.verifyCronBearerToken(`Bearer ${sampleSecret}`, null)).toBe(
+        false,
+      );
+      expect(solare.verifyCronBearerToken("", sampleSecret)).toBe(false);
+      expect(
+        solare.verifyCronBearerToken(`Basic ${sampleSecret}`, sampleSecret),
+      ).toBe(false);
+      expect(solare.verifyCronBearerToken("Bearer wrong", sampleSecret)).toBe(
+        false,
+      );
+      expect(
+        solare.verifyCronBearerToken(`Bearer ${sampleSecret}`, sampleSecret),
+      ).toBe(true);
     });
   });
 });

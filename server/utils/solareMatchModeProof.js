@@ -34,6 +34,24 @@ function nCk(n, k) {
   return result;
 }
 
+function parseTimestampMs(value) {
+  if (value === null || value === undefined) {
+    return null;
+  }
+  if (value instanceof Date) {
+    const ms = value.getTime();
+    return Number.isFinite(ms) ? ms : null;
+  }
+  if (typeof value === "number") {
+    return Number.isFinite(value) ? value : null;
+  }
+  if (typeof value === "string" && value.trim() !== "") {
+    const ms = Date.parse(value);
+    return Number.isFinite(ms) ? ms : null;
+  }
+  return null;
+}
+
 function normalizeRegion(region) {
   if (!region || typeof region !== "string") {
     throw new ValidationError({
@@ -81,24 +99,32 @@ function normalizeSeason(season) {
 
 /**
  * Pure deterministic solver that proves whether Solare matches are `ranked` or `practice`
- * using official account-wide W/L/D totals and ranking neighbor rating bounds.
+ * using official account-wide W/L/D totals, incremental W/L/D checkpoints, and ranking
+ * neighbor rating bounds.
  *
  * Rules:
  * - `.repz` matches are always Ranked (`repzRanked`) and can never be marked `practice`.
- * - `wl_exact` (`ranked`): >= 2 ranked participants in the match have exact DB W/L/D == official W/L/D.
- *   (A single exact participant is insufficient because 1 Practice game + 1 missing Ranked game cancel.)
- * - `math` (`practice`): for a ranked player with excess games (and 0 missing games), the match appears
- *   in 100% of valid exclusion subsets whose remaining PDL sum + starting base {401..801} lands inside
- *   the player's non-estimated neighbor rating bracket [low, up], AND no other ranked participant in
- *   that match contradicts it (`excess[outcome] <= 0`).
- * - `math` (`ranked`): for a ranked player with excess games, the match appears in 0% of valid exclusion subsets.
+ * - `wl_exact` (`ranked`): >= 2 ranked participants in the match have exact DB W/L/D == official W/L/D
+ *   (either season-wide or within an enclosing synchronized checkpoint window).
+ * - `math` (`practice` / `ranked`): for a ranked player with excess games (and 0 missing games),
+ *   a match in 100% of valid exclusion subsets whose remaining PDL sum + starting base {401..801}
+ *   lands inside [low, up] is `practice` (if uncontradicted), and 0% is `ranked`.
+ * - `checkpoint_wl_delta` (`practice`): within an uncontaminated checkpoint interval `(cp_prev, cp_curr]`,
+ *   if remaining non-practice matches of an outcome exceed `Δ(official)` and all excess candidates
+ *   must be excluded to reach `Δ(official)` (if uncontradicted), they are proven `practice` — even
+ *   for veterans missing early-season historical games.
+ * - `checkpoint_math` (`practice` / `ranked`): within `(cp_prev, cp_curr]` starting from an exact
+ *   `cp_prev.checkpoint_rating`, solves mixed Practice + Ranked intervals against neighbor bounds `[low, up]`.
  */
 export function computeMatchModeProofs({
   players = [],
+  unsyncedPlayers = [],
   matchRows = [],
   existingProofs = [],
+  checkpoints = [],
 } = {}) {
   const official = new Map();
+  const unsyncedUids = new Set();
   const nickToUid = new Map();
 
   for (const p of players) {
@@ -140,6 +166,29 @@ export function computeMatchModeProofs({
     }
   }
 
+  for (const up of unsyncedPlayers) {
+    const rawUserNo = up?.user_no ?? up?.uid ?? null;
+    const rawNick = up?.user_nickname ?? up?.nick ?? null;
+    const uid =
+      rawUserNo !== null && rawUserNo !== undefined
+        ? String(rawUserNo)
+        : rawNick
+          ? `nick:${String(rawNick).trim().toLowerCase()}`
+          : null;
+
+    if (!uid || official.has(uid)) {
+      continue;
+    }
+
+    unsyncedUids.add(uid);
+    if (rawNick) {
+      const normalizedNick = String(rawNick).trim().toLowerCase();
+      if (!nickToUid.has(normalizedNick)) {
+        nickToUid.set(normalizedNick, uid);
+      }
+    }
+  }
+
   const matches = new Map();
   const byUser = new Map();
 
@@ -149,12 +198,17 @@ export function computeMatchModeProofs({
       continue;
     }
 
+    const rowAt = parseTimestampMs(row.match_date ?? row.at);
+
     if (!matches.has(rn)) {
       matches.set(rn, {
         rn,
         repz: Boolean(row.repz),
+        at: rowAt,
         ps: [],
       });
+    } else if (matches.get(rn).at === null && rowAt !== null) {
+      matches.get(rn).at = rowAt;
     }
 
     const hasWinner =
@@ -174,17 +228,24 @@ export function computeMatchModeProofs({
           ? nickToUid.get(String(rawNick).trim().toLowerCase()) || null
           : null;
 
+    const effectiveAt = rowAt ?? matches.get(rn).at;
     matches.get(rn).ps.push({ uid, out, v });
     if (uid) {
       if (!byUser.has(uid)) {
         byUser.set(uid, []);
       }
-      byUser.get(uid).push({ rn, out, v });
+      byUser.get(uid).push({ rn, out, v, at: effectiveAt });
     }
+  }
+
+  for (const list of byUser.values()) {
+    list.sort((a, b) => a.rn - b.rn);
   }
 
   const proofs = new Map();
   const repzRanked = new Set();
+  const manualPractice = new Set();
+  const persistedPractice = new Set();
   let conflicts = 0;
 
   const setMode = (rn, mode, method) => {
@@ -225,8 +286,150 @@ export function computeMatchModeProofs({
       (ep.mode === "practice" || ep.mode === "ranked")
     ) {
       setMode(rn, ep.mode, "manual");
+      if (ep.mode === "practice" && !repzRanked.has(rn)) {
+        manualPractice.add(rn);
+      }
+    } else if (ep?.mode === "practice" && !repzRanked.has(rn)) {
+      persistedPractice.add(rn);
     }
   }
+
+  // Build sanitized incremental W/L/D checkpoint intervals per user
+  const rawCpByUser = new Map();
+  for (const cp of checkpoints) {
+    const rawUserNo = cp?.user_no ?? cp?.uid ?? null;
+    const cpRn = Number(cp?.checkpoint_record_no ?? cp?.rn);
+    if (
+      rawUserNo === null ||
+      rawUserNo === undefined ||
+      !Number.isFinite(cpRn)
+    ) {
+      continue;
+    }
+
+    const uid = String(rawUserNo);
+    const isEst = Boolean(cp.checkpoint_rating_is_estimated);
+    const rawRating = cp.checkpoint_rating ?? cp.rating ?? null;
+    const exactRating =
+      !isEst &&
+      rawRating !== null &&
+      rawRating !== undefined &&
+      Number.isFinite(Number(rawRating))
+        ? Number(rawRating)
+        : null;
+
+    if (!rawCpByUser.has(uid)) {
+      rawCpByUser.set(uid, new Map());
+    }
+    rawCpByUser.get(uid).set(cpRn, {
+      rn: cpRn,
+      at: parseTimestampMs(cp.checkpoint_at ?? cp.at),
+      w: Number(cp.win_count ?? cp.w ?? 0),
+      l: Number(cp.lose_count ?? cp.l ?? 0),
+      d: Number(cp.draw_count ?? cp.d ?? 0),
+      exactRating,
+    });
+  }
+
+  const countRawInWindow = (userMatches, prevRn, currRn) => {
+    const c = { w: 0, l: 0, d: 0 };
+    for (const x of userMatches) {
+      if (x.rn > prevRn && x.rn <= currRn && !manualPractice.has(x.rn)) {
+        c[x.out] += 1;
+      }
+    }
+    return c;
+  };
+
+  const intervalsByUser = new Map();
+  for (const [uid, cpMap] of rawCpByUser.entries()) {
+    const sorted = [...cpMap.values()].sort((a, b) => a.rn - b.rn);
+    if (sorted.length < 2) {
+      continue;
+    }
+
+    const userMatches = byUser.get(uid) || [];
+
+    // Drop intermediate checkpoints whose W/L/D lagged behind a crawled Ranked match
+    let idx = 1;
+    while (idx < sorted.length - 1) {
+      const prev = sorted[idx - 1];
+      const mid = sorted[idx];
+      const next = sorted[idx + 1];
+      const prevRaw = countRawInWindow(userMatches, prev.rn, mid.rn);
+      const nextRaw = countRawInWindow(userMatches, mid.rn, next.rn);
+
+      const laggedWin =
+        nextRaw.w < next.w - mid.w && prevRaw.w > mid.w - prev.w;
+      const laggedLoss =
+        nextRaw.l < next.l - mid.l && prevRaw.l > mid.l - prev.l;
+      const laggedDraw =
+        nextRaw.d < next.d - mid.d && prevRaw.d > mid.d - prev.d;
+
+      if (laggedWin || laggedLoss || laggedDraw) {
+        sorted.splice(idx, 1);
+        idx = Math.max(1, idx - 1);
+      } else {
+        idx += 1;
+      }
+    }
+
+    const validIntervals = [];
+    for (let i = 0; i < sorted.length - 1; i += 1) {
+      const prev = sorted[i];
+      const curr = sorted[i + 1];
+      const d = {
+        w: curr.w - prev.w,
+        l: curr.l - prev.l,
+        d: curr.d - prev.d,
+      };
+      if (d.w < 0 || d.l < 0 || d.d < 0) {
+        continue;
+      }
+
+      const ms = userMatches.filter((x) => x.rn > prev.rn && x.rn <= curr.rn);
+      const hasLatePre =
+        prev.at !== null &&
+        ms.some((x) => x.at !== null && x.at < prev.at - 2000);
+      if (hasLatePre) {
+        continue;
+      }
+
+      const rawCounts = { w: 0, l: 0, d: 0 };
+      for (const x of ms) {
+        if (!manualPractice.has(x.rn)) {
+          rawCounts[x.out] += 1;
+        }
+      }
+
+      validIntervals.push({
+        uid,
+        prevRn: prev.rn,
+        currRn: curr.rn,
+        d,
+        prevExactRating: prev.exactRating,
+        ms,
+        rawCounts,
+      });
+    }
+
+    if (validIntervals.length > 0) {
+      intervalsByUser.set(uid, validIntervals);
+    }
+  }
+
+  const enclosingIntervalOf = (uid, rn) => {
+    const ivs = intervalsByUser.get(uid);
+    if (!ivs) {
+      return null;
+    }
+    for (const iv of ivs) {
+      if (rn > iv.prevRn && rn <= iv.currRn) {
+        return iv;
+      }
+    }
+    return null;
+  };
 
   const excessCache = new Map();
   const excessOf = (uid) => {
@@ -253,9 +456,86 @@ export function computeMatchModeProofs({
     return excess;
   };
 
-  const isExact = (uid) => {
+  const remExcessOf = (uid) => {
+    const o = official.get(uid);
+    if (!o) {
+      return null;
+    }
+
+    const counts = { w: 0, l: 0, d: 0 };
+    for (const x of byUser.get(uid) || []) {
+      if (modeOf(x.rn) !== "practice") {
+        counts[x.out] += 1;
+      }
+    }
+
+    return {
+      w: counts.w - o.w,
+      l: counts.l - o.l,
+      d: counts.d - o.d,
+    };
+  };
+
+  const intervalRemExcessOf = (iv) => {
+    const counts = { w: 0, l: 0, d: 0 };
+    for (const x of iv.ms) {
+      if (modeOf(x.rn) !== "practice") {
+        counts[x.out] += 1;
+      }
+    }
+    return {
+      w: counts.w - iv.d.w,
+      l: counts.l - iv.d.l,
+      d: counts.d - iv.d.d,
+    };
+  };
+
+  const isExactOnMatch = (uid, rn) => {
     const e = excessOf(uid);
-    return Boolean(e) && e.w === 0 && e.l === 0 && e.d === 0;
+    if (Boolean(e) && e.w === 0 && e.l === 0 && e.d === 0) {
+      return true;
+    }
+    const iv = enclosingIntervalOf(uid, rn);
+    if (
+      iv &&
+      iv.d.w + iv.d.l + iv.d.d > 0 &&
+      iv.rawCounts.w === iv.d.w &&
+      iv.rawCounts.l === iv.d.l &&
+      iv.rawCounts.d === iv.d.d
+    ) {
+      return true;
+    }
+    return false;
+  };
+
+  // A participant contradicts `rn` being Practice ONLY when they have 0 missing Ranked games
+  // (either within an enclosing checkpoint interval or season-wide) AND 0 remaining excess for `p.out`.
+  // Veterans missing historical early-season games (`re.w < 0 || re.l < 0 || re.d < 0`) do NOT
+  // contradict another participant's Practice proof because `practice_db = excess + missing_ranked` can be >= 1.
+  const isContradictedForPractice = (rn, selfUid) => {
+    const matchObj = matches.get(rn);
+    if (!matchObj) {
+      return false;
+    }
+
+    return matchObj.ps.some((p) => {
+      if (!p.uid || p.uid === selfUid) {
+        return false;
+      }
+
+      const iv = enclosingIntervalOf(p.uid, rn);
+      if (iv) {
+        const ie = intervalRemExcessOf(iv);
+        if (ie.w >= 0 && ie.l >= 0 && ie.d >= 0 && ie[p.out] <= 0) {
+          return true;
+        }
+      }
+
+      const re = remExcessOf(p.uid);
+      return (
+        Boolean(re) && re.w >= 0 && re.l >= 0 && re.d >= 0 && re[p.out] <= 0
+      );
+    });
   };
 
   // 1. Ranked proof via >= 2 exact-W/L/D participants in the same match
@@ -264,8 +544,13 @@ export function computeMatchModeProofs({
       continue;
     }
 
-    const exactCount = m.ps.filter((p) => p.uid && isExact(p.uid)).length;
-    if (exactCount >= 2) {
+    const exactUids = new Set();
+    for (const p of m.ps) {
+      if (p.uid && isExactOnMatch(p.uid, m.rn)) {
+        exactUids.add(p.uid);
+      }
+    }
+    if (exactUids.size >= 2) {
       setMode(m.rn, "ranked", "wl_exact");
     }
   }
@@ -277,7 +562,11 @@ export function computeMatchModeProofs({
     .sort((a, b) => a.rk - b.rk);
 
   const bracketOf = (uid) => {
-    const rk = official.get(uid).rk;
+    const entry = official.get(uid);
+    if (!entry) {
+      return { up: null, low: null };
+    }
+    const rk = entry.rk;
     let up = rk === 1 ? 99999 : null;
     let low = null;
 
@@ -296,46 +585,7 @@ export function computeMatchModeProofs({
     return { up, low };
   };
 
-  const solvePlayer = (uid) => {
-    const ex = excessOf(uid);
-    if (!ex || ex.w < 0 || ex.l < 0 || ex.d < 0) {
-      return { status: "missing_games" };
-    }
-
-    const ms = byUser.get(uid);
-    if (!ms || ms.some((x) => x.v === null || Number.isNaN(x.v))) {
-      return { status: "null_pdl" };
-    }
-
-    const need = { ...ex };
-    let baseDeltaSum = 0;
-    const cand = { w: [], l: [], d: [] };
-
-    for (const x of ms) {
-      const md = modeOf(x.rn);
-      if (md === "practice") {
-        need[x.out] -= 1;
-        continue;
-      }
-
-      baseDeltaSum += x.v;
-      if (md !== "ranked") {
-        cand[x.out].push(x);
-      }
-    }
-
-    if (need.w < 0 || need.l < 0 || need.d < 0) {
-      return { status: "inconsistent" };
-    }
-    if (need.w + need.l + need.d === 0) {
-      return { status: "no_excess" };
-    }
-
-    const { up, low } = bracketOf(uid);
-    if (up === null || low === null || up < low) {
-      return { status: "no_bracket" };
-    }
-
+  const solveSubset = ({ uid, cand, need, baseDeltaSum, bases, low, up }) => {
     const totalCombos =
       nCk(cand.w.length, need.w) *
       nCk(cand.l.length, need.l) *
@@ -350,15 +600,7 @@ export function computeMatchModeProofs({
     const allCands = [...cand.w, ...cand.l, ...cand.d];
     const contradictedRns = new Set(
       allCands
-        .filter((x) =>
-          matches.get(x.rn).ps.some((p) => {
-            if (!p.uid || p.uid === uid) {
-              return false;
-            }
-            const e = excessOf(p.uid);
-            return Boolean(e) && e[p.out] <= 0;
-          }),
-        )
+        .filter((x) => isContradictedForPractice(x.rn, uid))
         .map((x) => x.rn),
     );
 
@@ -375,7 +617,7 @@ export function computeMatchModeProofs({
         for (const cd of combos(cand.d, need.d)) {
           const sd = cd.reduce((s, x) => s + x.v, 0);
           const remainingDelta = baseDeltaSum - sw - sl - sd;
-          const fits = BASES.some((b) => {
+          const fits = bases.some((b) => {
             const candidateRating = Math.max(0, b + remainingDelta);
             return candidateRating >= low && candidateRating <= up;
           });
@@ -418,10 +660,65 @@ export function computeMatchModeProofs({
       }
     }
 
+    if (practice.some((rn) => contradictedRns.has(rn))) {
+      return { status: "contradicted" };
+    }
+
     return { status: "solved", practice, ranked };
   };
 
-  // 3. Fixed-point propagation across all ranked players
+  const solvePlayer = (uid) => {
+    const ex = excessOf(uid);
+    if (!ex || ex.w < 0 || ex.l < 0 || ex.d < 0) {
+      return { status: "missing_games" };
+    }
+
+    const ms = byUser.get(uid);
+    if (!ms || ms.some((x) => x.v === null || Number.isNaN(x.v))) {
+      return { status: "null_pdl" };
+    }
+
+    const need = { ...ex };
+    let baseDeltaSum = 0;
+    const cand = { w: [], l: [], d: [] };
+
+    for (const x of ms) {
+      const md = modeOf(x.rn);
+      if (md === "practice") {
+        need[x.out] -= 1;
+        continue;
+      }
+
+      baseDeltaSum += x.v;
+      if (md !== "ranked") {
+        cand[x.out].push(x);
+      }
+    }
+
+    if (need.w < 0 || need.l < 0 || need.d < 0) {
+      return { status: "inconsistent" };
+    }
+    if (need.w + need.l + need.d === 0) {
+      return { status: "no_excess" };
+    }
+
+    const { up, low } = bracketOf(uid);
+    if (up === null || low === null || up < low) {
+      return { status: "no_bracket" };
+    }
+
+    return solveSubset({
+      uid,
+      cand,
+      need,
+      baseDeltaSum,
+      bases: BASES,
+      low,
+      up,
+    });
+  };
+
+  // 3. Fixed-point propagation across season-wide players and incremental checkpoints
   let rejectedPractice = 0;
   const statusCount = {};
 
@@ -446,21 +743,6 @@ export function computeMatchModeProofs({
         continue;
       }
 
-      const hasContradictedPractice = solved.practice.some((rn) =>
-        matches.get(rn).ps.some((p) => {
-          if (!p.uid || p.uid === uid) {
-            return false;
-          }
-          const e = excessOf(p.uid);
-          return Boolean(e) && e[p.out] <= 0;
-        }),
-      );
-
-      if (hasContradictedPractice) {
-        rejectedPractice += 1;
-        continue;
-      }
-
       for (const rn of solved.practice) {
         if (setMode(rn, "practice", "math")) {
           changed += 1;
@@ -474,26 +756,224 @@ export function computeMatchModeProofs({
       }
     }
 
+    for (const ivs of intervalsByUser.values()) {
+      for (const iv of ivs) {
+        if (iv.ms.length === 0) {
+          continue;
+        }
+
+        const nonPrac = { w: 0, l: 0, d: 0 };
+        const cand = { w: [], l: [], d: [] };
+        let baseDeltaSum = 0;
+        let hasNullPdl = false;
+
+        for (const x of iv.ms) {
+          const md = modeOf(x.rn);
+          if (md === "practice") {
+            continue;
+          }
+          nonPrac[x.out] += 1;
+          if (x.v === null || Number.isNaN(x.v)) {
+            hasNullPdl = true;
+          } else {
+            baseDeltaSum += x.v;
+          }
+          if (md !== "ranked") {
+            cand[x.out].push(x);
+          }
+        }
+
+        const need = {
+          w: nonPrac.w - iv.d.w,
+          l: nonPrac.l - iv.d.l,
+          d: nonPrac.d - iv.d.d,
+        };
+
+        // 3a. Direct outcome pigeonhole proof (`checkpoint_wl_delta`)
+        for (const out of ["w", "l", "d"]) {
+          if (
+            iv.d[out] >= 0 &&
+            need[out] > 0 &&
+            cand[out].length === need[out]
+          ) {
+            const hasContra = cand[out].some((x) =>
+              isContradictedForPractice(x.rn, iv.uid),
+            );
+            if (hasContra) {
+              rejectedPractice += 1;
+              continue;
+            }
+            for (const x of cand[out]) {
+              if (setMode(x.rn, "practice", "checkpoint_wl_delta")) {
+                changed += 1;
+              }
+              need[out] -= 1;
+              if (x.v !== null && !Number.isNaN(x.v)) {
+                baseDeltaSum -= x.v;
+              }
+            }
+            cand[out] = [];
+          }
+        }
+
+        // 3b. Combinatorial checkpoint rating proof (`checkpoint_math`)
+        if (
+          need.w >= 0 &&
+          need.l >= 0 &&
+          need.d >= 0 &&
+          need.w + need.l + need.d > 0 &&
+          !hasNullPdl &&
+          iv.prevExactRating !== null &&
+          official.has(iv.uid)
+        ) {
+          const hasPostCurrMatch = (byUser.get(iv.uid) || []).some(
+            (x) => x.rn > iv.currRn && modeOf(x.rn) !== "practice",
+          );
+          if (!hasPostCurrMatch) {
+            const { up, low } = bracketOf(iv.uid);
+            if (up !== null && low !== null && up >= low) {
+              const cpSolved = solveSubset({
+                uid: iv.uid,
+                cand,
+                need,
+                baseDeltaSum,
+                bases: [iv.prevExactRating],
+                low,
+                up,
+              });
+              if (cpSolved.status === "contradicted") {
+                rejectedPractice += 1;
+              } else if (cpSolved.status === "solved") {
+                for (const rn of cpSolved.practice) {
+                  if (setMode(rn, "practice", "checkpoint_math")) {
+                    changed += 1;
+                  }
+                }
+                for (const rn of cpSolved.ranked) {
+                  if (setMode(rn, "ranked", "checkpoint_math")) {
+                    changed += 1;
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+
     if (!changed) {
       break;
     }
   }
 
-  // Matches that cannot be Practice (has .repz, or a synchronized participant has excess[outcome] <= 0)
+  const isEffectivePersistedPractice = (rn) => {
+    const activeMode = modeOf(rn);
+    if (activeMode === "practice") {
+      return true;
+    }
+    if (activeMode === "ranked") {
+      return false;
+    }
+    return persistedPractice.has(rn);
+  };
+
+  // Matches without an active Practice proof that must invalidate any stale persisted Practice proof
   const invalidatedPractice = new Set(repzRanked);
   for (const m of matches.values()) {
     if (proofs.get(m.rn)?.mode === "practice") {
       continue;
     }
-    const isContradictedByParticipant = m.ps.some((p) => {
+
+    // 1. Hard contradiction by a participant with complete counts (in enclosing checkpoint or season-wide)
+    const isHardContradicted = m.ps.some((p) => {
       if (!p.uid) {
         return false;
       }
+      const iv = enclosingIntervalOf(p.uid, m.rn);
+      if (iv) {
+        return intervalRemExcessOf(iv)[p.out] <= 0;
+      }
       const e = excessOf(p.uid);
-      return Boolean(e) && e[p.out] <= 0;
+      if (!e || e.w < 0 || e.l < 0 || e.d < 0) {
+        return false;
+      }
+      const re = remExcessOf(p.uid);
+      return Boolean(re) && re[p.out] <= 0;
     });
-    if (isContradictedByParticipant) {
+
+    if (isHardContradicted) {
       invalidatedPractice.add(m.rn);
+      continue;
+    }
+
+    // 2. Partial snapshot refresh over-exclusion: keeping persisted Practice proofs leaves < official Ranked count
+    if (persistedPractice.has(m.rn)) {
+      const isOverExcluded = m.ps.some((p) => {
+        if (!p.uid) {
+          return false;
+        }
+        const iv = enclosingIntervalOf(p.uid, m.rn);
+        if (iv) {
+          let nonPracCount = 0;
+          for (const x of iv.ms) {
+            if (x.out === p.out && !isEffectivePersistedPractice(x.rn)) {
+              nonPracCount += 1;
+            }
+          }
+          return nonPracCount < iv.d[p.out];
+        }
+        const e = excessOf(p.uid);
+        const o = official.get(p.uid);
+        if (!e || !o || e.w < 0 || e.l < 0 || e.d < 0) {
+          return false;
+        }
+        let nonPracSeason = 0;
+        for (const x of byUser.get(p.uid) || []) {
+          if (x.out === p.out && !isEffectivePersistedPractice(x.rn)) {
+            nonPracSeason += 1;
+          }
+        }
+        return nonPracSeason < o[p.out];
+      });
+
+      if (isOverExcluded) {
+        invalidatedPractice.add(m.rn);
+        continue;
+      }
+    }
+
+    // 3. Orphaned stale proof: at least one participant has <= 0 excess and NO participant can act as an excess prover
+    const hasNonPositiveParticipant = m.ps.some((p) => {
+      if (!p.uid) {
+        return false;
+      }
+      const iv = enclosingIntervalOf(p.uid, m.rn);
+      if (iv) {
+        return intervalRemExcessOf(iv)[p.out] <= 0;
+      }
+      const re = remExcessOf(p.uid);
+      return Boolean(re) && re[p.out] <= 0;
+    });
+
+    if (hasNonPositiveParticipant) {
+      const hasPotentialProver = m.ps.some((p) => {
+        if (!p.uid) {
+          return false;
+        }
+        const iv = enclosingIntervalOf(p.uid, m.rn);
+        if (iv) {
+          return intervalRemExcessOf(iv)[p.out] > 0;
+        }
+        if (unsyncedUids.has(p.uid)) {
+          return true;
+        }
+        const re = remExcessOf(p.uid);
+        return Boolean(re) && re[p.out] > 0;
+      });
+
+      if (!hasPotentialProver) {
+        invalidatedPractice.add(m.rn);
+      }
     }
   }
 
@@ -524,51 +1004,50 @@ export function computeMatchModeProofs({
 
 /**
  * Pure-PostgreSQL region proof runner (0 external HTTP calls).
- * Reads synchronized ranked players + season matches, computes mathematical proofs,
- * persists `solare_match_mode_proofs`, and refreshes `solare_practice_suspect_matches`.
+ * Reads synchronized ranked players, incremental W/L/D checkpoints, and season matches,
+ * computes mathematical proofs, persists `solare_match_mode_proofs`, and refreshes
+ * `solare_practice_suspect_matches`.
  */
 export async function proveRegionMatchModes({ region, season } = {}) {
   const targetRegion = normalizeRegion(region);
   const targetSeason = normalizeSeason(season);
 
-  const [playersResult, matchesResult, manualProofsResult] = await Promise.all([
-    database.query({
-      text: `
-        WITH latest_by_rank AS (
-          SELECT DISTINCT ON (sp.current_ranking)
-            sp.user_no,
-            sp.user_nickname,
-            sp.current_ranking,
-            sp.win_count,
-            sp.lose_count,
-            sp.draw_count,
-            sp.rank_rating,
-            sp.rating_is_estimated,
-            sp.last_seen_at
-          FROM solare_players sp
-          WHERE sp.region = $1
-            AND sp.current_ranking IS NOT NULL
-            AND sp.current_ranking >= 1
-            AND (
-              sp.season = $2
-              OR ($2 = 9 AND sp.season IS NULL)
-            )
-          ORDER BY
-            sp.current_ranking ASC,
-            sp.last_seen_at DESC NULLS LAST,
-            sp.updated_at DESC NULLS LAST
-        )
-        SELECT
-          l.user_no,
-          l.user_nickname,
-          l.current_ranking,
-          l.win_count,
-          l.lose_count,
-          l.draw_count,
-          l.rank_rating,
-          l.rating_is_estimated
-        FROM latest_by_rank l
-        WHERE
+  const playersResult = await database.query({
+    text: `
+      WITH latest_by_rank AS (
+        SELECT DISTINCT ON (sp.current_ranking)
+          sp.user_no,
+          sp.user_nickname,
+          sp.current_ranking,
+          sp.win_count,
+          sp.lose_count,
+          sp.draw_count,
+          sp.rank_rating,
+          sp.rating_is_estimated,
+          sp.last_seen_at
+        FROM solare_players sp
+        WHERE sp.region = $1
+          AND sp.current_ranking IS NOT NULL
+          AND sp.current_ranking >= 1
+          AND (
+            sp.season = $2
+            OR ($2 = 9 AND sp.season IS NULL)
+          )
+        ORDER BY
+          sp.current_ranking ASC,
+          sp.last_seen_at DESC NULLS LAST,
+          sp.updated_at DESC NULLS LAST
+      )
+      SELECT
+        l.user_no,
+        l.user_nickname,
+        l.current_ranking,
+        l.win_count,
+        l.lose_count,
+        l.draw_count,
+        l.rank_rating,
+        l.rating_is_estimated,
+        (
           l.last_seen_at IS NULL
           OR NOT EXISTS (
             SELECT 1
@@ -590,49 +1069,86 @@ export async function proveRegionMatchModes({ region, season } = {}) {
               AND m.match_date IS NOT NULL
               AND m.match_date > l.last_seen_at + INTERVAL '10 seconds'
           )
-        ORDER BY l.current_ranking ASC
-        ;`,
-      values: [targetRegion, targetSeason],
-    }),
-    database.query({
-      text: `
-        SELECT
-          m.record_no::bigint AS record_no,
-          NULLIF(TRIM(m.repz_download_url), '') IS NOT NULL AS repz,
-          mp.user_no,
-          mp.user_nickname,
-          mp.is_winner,
-          mp.vary_rank_rating,
-          BOOL_OR(mp.is_winner) OVER (PARTITION BY m.record_no) AS has_winner
-        FROM solare_matches m
-        INNER JOIN solare_match_players mp
-          ON mp.region = m.region AND mp.record_no = m.record_no
-        WHERE m.region = $1
-          AND (
-            m.season = $2
-            OR ($2 = 9 AND m.season IS NULL)
-          )
-        ;`,
-      values: [targetRegion, targetSeason],
-    }),
-    database.query({
-      text: `
-        SELECT
-          record_no::bigint AS record_no,
-          mode,
-          method
-        FROM solare_match_mode_proofs
-        WHERE region = $1
-          AND method = 'manual'
-        ;`,
-      values: [targetRegion],
-    }),
-  ]);
+        ) AS is_synced
+      FROM latest_by_rank l
+      ORDER BY l.current_ranking ASC
+      ;`,
+    values: [targetRegion, targetSeason],
+  });
+
+  const matchesResult = await database.query({
+    text: `
+      SELECT
+        m.record_no::bigint AS record_no,
+        m.match_date,
+        NULLIF(TRIM(m.repz_download_url), '') IS NOT NULL AS repz,
+        mp.user_no,
+        mp.user_nickname,
+        mp.is_winner,
+        mp.vary_rank_rating,
+        BOOL_OR(mp.is_winner) OVER (PARTITION BY m.record_no) AS has_winner
+      FROM solare_matches m
+      INNER JOIN solare_match_players mp
+        ON mp.region = m.region AND mp.record_no = m.record_no
+      WHERE m.region = $1
+        AND (
+          m.season = $2
+          OR ($2 = 9 AND m.season IS NULL)
+        )
+      ;`,
+    values: [targetRegion, targetSeason],
+  });
+
+  const existingProofsResult = await database.query({
+    text: `
+      SELECT
+        record_no::bigint AS record_no,
+        mode,
+        method
+      FROM solare_match_mode_proofs
+      WHERE region = $1
+      ;`,
+    values: [targetRegion],
+  });
+
+  const checkpointsResult = await database.query({
+    text: `
+      SELECT
+        user_no,
+        checkpoint_record_no::bigint AS checkpoint_record_no,
+        checkpoint_at,
+        win_count,
+        lose_count,
+        draw_count,
+        checkpoint_rating,
+        checkpoint_rating_is_estimated
+      FROM solare_player_wl_checkpoints
+      WHERE region = $1
+        AND (
+          season = $2
+          OR ($2 = 9 AND season IS NULL)
+        )
+      ORDER BY user_no ASC, checkpoint_record_no ASC
+      ;`,
+    values: [targetRegion, targetSeason],
+  });
+
+  const syncedPlayers = [];
+  const unsyncedPlayers = [];
+  for (const row of playersResult.rows) {
+    if (row.is_synced) {
+      syncedPlayers.push(row);
+    } else {
+      unsyncedPlayers.push(row);
+    }
+  }
 
   const { proofs, invalidatedPractice, stats } = computeMatchModeProofs({
-    players: playersResult.rows,
+    players: syncedPlayers,
+    unsyncedPlayers,
     matchRows: matchesResult.rows,
-    existingProofs: manualProofsResult.rows,
+    existingProofs: existingProofsResult.rows,
+    checkpoints: checkpointsResult.rows,
   });
 
   const entries = [...proofs.entries()].filter(

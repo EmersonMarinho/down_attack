@@ -1,18 +1,19 @@
 /**
- * Provas matemáticas Ranked x Treino + aproximação de rating pelos vizinhos do ranking.
+ * Mathematical Ranked vs Practice proofs + rating estimation from ranking neighbors.
  *
- * `solare_match_mode_proofs` guarda o modo de cada partida quando ele foi PROVADO fora do banco
- * (crawler, com o W/L oficial do GetRankList ao vivo, que já é o total da conta somando todas as classes):
- * - `ranked`: 2+ participantes com W/L do banco exatamente igual ao oficial, ou a partida não aparece em
- *   nenhuma combinação válida de exclusão (contagem de excesso + rating entre os vizinhos do ranking).
- * - `practice`: a partida aparece em TODAS as combinações válidas de exclusão de um jogador e nenhum
- *   outro participante presente no ranking contradiz (sem excesso no próprio resultado).
- * Nada é apagado: provas de treino entram em `solare_practice_suspect_matches` (reason `math_proof`) e
- * continuam passando pela trava de W/L da inferência; provas de Ranked nunca viram suspeitas.
+ * `solare_match_mode_proofs` stores the match mode whenever it has been mathematically proven
+ * from official account-wide W/L/D totals (`GetRankList`):
+ * - `ranked`: >= 2 participants have DB W/L/D strictly equal to official totals, or the match
+ *   appears in 0% of valid Practice exclusion subsets bounded by rated ranking neighbors.
+ * - `practice`: the match appears in 100% of valid exclusion subsets for a player and no other
+ *   ranked participant contradicts it.
+ * Zero rows are deleted: proven Practice matches are mirrored into `solare_practice_suspect_matches`
+ * (`math_proof`), while proven Ranked matches are never flagged as suspects.
  *
- * Aproximação pelos vizinhos: o ranking oficial é ordenado por rating. Quando a inferência exata falha,
- * mas os vizinhos com rating são coerentes e estão a até 40 pontos entre si, o rating é interpolado pela
- * posição e marcado em `solare_players.rating_is_estimated`.
+ * Neighbor rating estimation: because the official ranking is ordered by rating, whenever exact
+ * inference cannot resolve a player whose nearest rated neighbors are consistent and within 40
+ * points of each other, the rating is linearly interpolated by rank position and marked via
+ * `solare_players.rating_is_estimated = TRUE`.
  */
 exports.up = (pgm) => {
   pgm.sql(`
@@ -73,7 +74,7 @@ exports.up = (pgm) => {
         FROM room_stats
         WHERE has_repz
       ),
-      -- Partidas sem .repz entre duas sessões Ranked (fechamento noturno >= 6h entre as .repz vizinhas)
+      -- Matches without .repz between two Ranked sessions (overnight queue closure >= 6h between adjacent .repz matches)
       overnight_gap AS (
         SELECT rs.record_no, 'overnight_gap'::varchar(32) AS reason
         FROM room_stats rs
@@ -83,7 +84,7 @@ exports.up = (pgm) => {
         WHERE NOT rs.has_repz
           AND ri.next_date - ri.prev_date >= INTERVAL '6 hours'
       ),
-      -- Sala inteira com PDL baixo (>= 3 jogadores resolvidos e todos com |PDL| <= 15)
+      -- Full low-PDL lobby (>= 3 resolved players and all with |PDL| <= 15)
       low_pdl_room AS (
         SELECT record_no, 'low_pdl_room'::varchar(32) AS reason
         FROM room_stats
@@ -92,7 +93,7 @@ exports.up = (pgm) => {
           AND valid_pdl_count >= 3
           AND max_abs_pdl <= 15
       ),
-      -- Trio pré-formado (a Ranked é Solo Queue): mesmo trio no mesmo time em 2+ partidas sem .repz próximas
+      -- Premade trio (Ranked is strictly Solo Queue): identical 3-player team in 2+ nearby non-.repz matches
       team_keys AS (
         SELECT
           mp.record_no,
@@ -134,7 +135,7 @@ exports.up = (pgm) => {
       SELECT p_region, record_no, reason
       FROM all_suspects s
       WHERE s.record_no >= COALESCE(p_min_record_no, 0)
-        -- Partidas provadas Ranked nunca viram suspeitas
+        -- Proven Ranked matches are never flagged as suspects
         AND NOT EXISTS (
           SELECT 1
           FROM solare_match_mode_proofs pr
@@ -262,8 +263,8 @@ exports.up = (pgm) => {
       INTO v_stats
       FROM player_matches;
 
-      -- Só ignora as suspeitas quando isso comprovadamente aproxima o W/L/D do oficial,
-      -- sem deixar nenhum excesso e com no máximo 2 jogos de diferença.
+      -- Only ignore suspect matches when doing so brings DB W/L/D strictly closer to official counts,
+      -- leaving zero excess and at most 2 games of difference.
       IF v_stats.suspect_count > 0 THEN
         v_dist_full :=
           ABS(v_stats.full_w - COALESCE(v_player.win_count, 0))
@@ -319,7 +320,7 @@ exports.up = (pgm) => {
         RETURN FALSE;
       END IF;
 
-      -- Para cada posição do ranking vale só a linha vista mais recentemente (ignora duplicatas antigas)
+      -- Deduplicate each ranking slot by the most recently seen player row (ignore stale duplicates)
       SELECT x.rank_rating, x.current_ranking
       INTO v_upper_bound, v_upper_rank
       FROM (
@@ -399,8 +400,8 @@ exports.up = (pgm) => {
       v_base_rating := v_inferred.base_rating;
 
       IF v_inferred IS NULL OR v_inferred.bracket_distance > 45 THEN
-        -- Fallback: aproxima pelo ranking oficial (ordenado por rating), interpolando entre os vizinhos
-        -- mais próximos com rating. Só quando os vizinhos são coerentes e estão a até 40 pontos entre si.
+        -- Fallback: linearly interpolate from the official ranking (ordered by rating) between nearest
+        -- rated neighbors when bounds are consistent and at most 40 points apart.
         IF v_upper_bound IS NULL
            OR v_lower_bound IS NULL
            OR v_upper_bound < v_lower_bound

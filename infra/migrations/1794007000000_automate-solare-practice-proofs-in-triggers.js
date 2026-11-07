@@ -1,30 +1,290 @@
 /**
- * Automação completa das provas matemáticas de Modo Treino nos triggers e proteção de deltas Ranked.
+ * Full real-time automation of mathematical Practice Mode proofs, incremental W/L/D checkpoints,
+ * and Ranked rating delta protection in PostgreSQL triggers.
  *
- * O que passa a acontecer automaticamente no PostgreSQL (sem apagar partidas e sem chamadas HTTP):
- * 1. `trg_solare_match_mode_proof_sync`:
- *    - Ao gravar uma prova `practice` em `solare_match_mode_proofs`, sincroniza
- *      `solare_practice_suspect_matches` (`math_proof`) e reverte imediatamente qualquer
- *      `match_delta` já aplicado em jogadores ancorados na mesma época/temporada (usando o delta
- *      efetivamente aplicado e restaurando `rating_achieved_record_no` / `rating_achieved_at`).
- *    - Ao invalidar (`DELETE`) ou alterar de `practice` para `ranked`, remove a suspeita e
- *      reaplica de forma idempotente os `match_delta` dos participantes ancorados.
- * 2. `fn_apply_solare_match_rating_delta`: ignora partidas provadas `practice` e partidas de outra
- *    temporada para nunca contaminar o `rank_rating` de jogadores ancorados/seeded.
- * 3. `fn_infer_unseeded_solare_player_rating`:
- *    - Sempre exclui partidas já provadas `practice` em `solare_match_mode_proofs`.
- *    - Usa apenas vizinhos com rating NÃO estimado (`NOT rating_is_estimated`) e sincronizados com o
- *      snapshot (`sem partida não-practice após last_seen_at + 10s`) como limites matemáticos.
- *    - Resolve `1..4` partidas excedentes (`<= 5000` combinações) em tempo real (`trigger_math`),
- *      verificando não-contradição (com fallback por nickname quando `user_no IS NULL`) e exigindo ao
- *      menos uma combinação válida 100% livre de contradição.
- *    - Jamais grava Elo exato (`rating_is_estimated = FALSE`) por soma bruta quando ainda restam
- *      partidas excedentes não resolvidas, caindo para interpolação segura entre vizinhos (`<= 40` pts).
+ * What happens automatically inside PostgreSQL (zero destructive row deletes, zero external HTTP calls):
+ * 1. `solare_player_wl_checkpoints` + `fn_process_solare_player_wl_checkpoint`:
+ *    - Records synchronized official W/L/D snapshots per `(region, user_no, season, checkpoint_record_no)`
+ *      whenever `last_seen_at` advances on `solare_players`.
+ *    - Proves Practice Mode matches even for anchored veterans with incomplete early-season match history
+ *      by comparing incremental `Δ(W/L/D)` and `checkpoint_rating` across consecutive snapshots
+ *      (`checkpoint_wl_delta` and `checkpoint_math`), and self-heals in real time if a cached snapshot
+ *      subsequently increments official W/L/D on the same `checkpoint_record_no`.
+ * 2. `trg_solare_match_mode_proof_sync`:
+ *    - When a match is proven `practice`, mirrors it to `solare_practice_suspect_matches` (`math_proof`)
+ *      and rolls back any previously applied `match_delta` events on anchored players within the same
+ *      rating epoch and season (respecting floor-at-0 truncation and restoring `rating_achieved_*`).
+ *    - When a `practice` proof is deleted or updated to `ranked`, removes the suspect flag and
+ *      idempotently re-applies `match_delta` events on anchored participants.
+ * 3. `fn_apply_solare_match_rating_delta`:
+ *    - Skips matches proven `practice` and cross-season matches so Practice Mode PDL never contaminates
+ *      anchored or live player ratings.
+ * 4. `fn_infer_unseeded_solare_player_rating`:
+ *    - Excludes proven `practice` matches, uses only synchronized non-estimated neighbors as hard bounds,
+ *      solves `1..4` excess games (`<= 5,000` combinations) in real time (`trigger_math`), never writes
+ *      a false exact rating via raw sum when unresolved pre-snapshot excess remains, interpolates closely
+ *      bounded neighbors (`<= 40` pts, `rating_is_estimated = TRUE`), and upgrades estimates to exact
+ *      ratings (`FALSE`) once matches arrive.
  */
 exports.up = (pgm) => {
   pgm.sql(`
     CREATE INDEX IF NOT EXISTS solare_match_mode_proofs_region_mode_record_no_idx
     ON solare_match_mode_proofs (region, mode, record_no);
+
+    CREATE TABLE IF NOT EXISTS solare_player_wl_checkpoints (
+      region varchar(8) NOT NULL,
+      user_no bigint NOT NULL,
+      season smallint NOT NULL DEFAULT 9,
+      checkpoint_record_no bigint NOT NULL DEFAULT 0,
+      checkpoint_at timestamptz NOT NULL,
+      win_count integer NOT NULL DEFAULT 0,
+      lose_count integer NOT NULL DEFAULT 0,
+      draw_count integer NOT NULL DEFAULT 0,
+      checkpoint_rating integer,
+      checkpoint_rating_is_estimated boolean NOT NULL DEFAULT FALSE,
+      updated_at timestamptz NOT NULL DEFAULT timezone('utc', now()),
+      PRIMARY KEY (region, user_no, season, checkpoint_record_no)
+    );
+  `);
+
+  pgm.sql(`
+    CREATE OR REPLACE FUNCTION fn_is_solare_practice_contradicted(
+      p_region VARCHAR,
+      p_record_no BIGINT,
+      p_self_user_no BIGINT,
+      p_self_nickname VARCHAR,
+      p_season INTEGER
+    )
+    RETURNS BOOLEAN AS $$
+    DECLARE
+      v_target_season SMALLINT := COALESCE(p_season, 9)::smallint;
+      v_part RECORD;
+      v_cp_prev RECORD;
+      v_cp_curr RECORD;
+      v_has_late_pre BOOLEAN;
+      v_int_w INTEGER;
+      v_int_l INTEGER;
+      v_int_d INTEGER;
+      v_dw INTEGER;
+      v_dl INTEGER;
+      v_dd INTEGER;
+      v_tot_w INTEGER;
+      v_tot_l INTEGER;
+      v_tot_d INTEGER;
+    BEGIN
+      FOR v_part IN
+        SELECT
+          sp2.user_no,
+          sp2.user_nickname,
+          sp2.season,
+          sp2.win_count,
+          sp2.lose_count,
+          sp2.draw_count,
+          sp2.last_seen_at,
+          CASE
+            WHEN mp2.is_winner THEN 'w'
+            WHEN EXISTS (
+              SELECT 1
+              FROM solare_match_players w2
+              WHERE w2.region = mp2.region
+                AND w2.record_no = mp2.record_no
+                AND w2.is_winner
+            ) THEN 'l'
+            ELSE 'd'
+          END AS outcome
+        FROM solare_match_players mp2
+        INNER JOIN solare_players sp2
+          ON sp2.region = mp2.region
+         AND (
+           (mp2.user_no IS NOT NULL AND sp2.user_no = mp2.user_no)
+           OR (mp2.user_no IS NULL AND LOWER(sp2.user_nickname) = LOWER(mp2.user_nickname))
+         )
+        WHERE mp2.region = p_region
+          AND mp2.record_no = p_record_no
+          AND NOT (
+            (p_self_user_no IS NOT NULL AND sp2.user_no = p_self_user_no)
+            OR (p_self_user_no IS NULL AND LOWER(sp2.user_nickname) = LOWER(COALESCE(p_self_nickname, '')))
+          )
+          AND sp2.current_ranking IS NOT NULL
+          AND sp2.current_ranking >= 1
+          AND (
+            sp2.season = v_target_season
+            OR (v_target_season = 9 AND sp2.season IS NULL)
+          )
+          AND NOT EXISTS (
+            SELECT 1
+            FROM solare_players sp_newer
+            WHERE sp_newer.region = sp2.region
+              AND sp_newer.current_ranking = sp2.current_ranking
+              AND NOT (
+                (sp2.user_no IS NOT NULL AND sp_newer.user_no = sp2.user_no)
+                OR (sp2.user_no IS NULL AND sp_newer.user_no IS NULL AND LOWER(sp_newer.user_nickname) = LOWER(sp2.user_nickname))
+              )
+              AND (
+                sp_newer.season = v_target_season
+                OR (v_target_season = 9 AND sp_newer.season IS NULL)
+              )
+              AND COALESCE(sp_newer.last_seen_at, sp_newer.updated_at) > COALESCE(sp2.last_seen_at, sp2.updated_at)
+          )
+          AND (
+            sp2.last_seen_at IS NULL
+            OR NOT EXISTS (
+              SELECT 1
+              FROM solare_match_players mp_post
+              INNER JOIN solare_matches m_post
+                ON m_post.region = mp_post.region AND m_post.record_no = mp_post.record_no
+              LEFT JOIN solare_match_mode_proofs pr_post
+                ON pr_post.region = mp_post.region AND pr_post.record_no = mp_post.record_no
+              WHERE mp_post.region = sp2.region
+                AND COALESCE(pr_post.mode, '') <> 'practice'
+                AND (
+                  (sp2.user_no IS NOT NULL AND mp_post.user_no = sp2.user_no)
+                  OR ((sp2.user_no IS NULL OR mp_post.user_no IS NULL) AND LOWER(mp_post.user_nickname) = LOWER(sp2.user_nickname))
+                )
+                AND COALESCE(m_post.season, 9) = COALESCE(sp2.season, v_target_season)
+                AND m_post.match_date IS NOT NULL
+                AND m_post.match_date > sp2.last_seen_at + INTERVAL '10 seconds'
+            )
+          )
+      LOOP
+        -- 1. Check enclosing incremental checkpoint interval if available
+        IF v_part.user_no IS NOT NULL THEN
+          SELECT *
+          INTO v_cp_prev
+          FROM solare_player_wl_checkpoints
+          WHERE region = p_region
+            AND user_no = v_part.user_no
+            AND season = COALESCE(v_part.season, v_target_season)
+            AND checkpoint_record_no < p_record_no
+          ORDER BY checkpoint_record_no DESC
+          LIMIT 1;
+
+          IF FOUND THEN
+            SELECT *
+            INTO v_cp_curr
+            FROM solare_player_wl_checkpoints
+            WHERE region = p_region
+              AND user_no = v_part.user_no
+              AND season = COALESCE(v_part.season, v_target_season)
+              AND checkpoint_record_no >= p_record_no
+            ORDER BY checkpoint_record_no ASC
+            LIMIT 1;
+
+            IF FOUND THEN
+              SELECT EXISTS (
+                SELECT 1
+                FROM solare_match_players mp_l
+                INNER JOIN solare_matches m_l
+                  ON m_l.region = mp_l.region AND m_l.record_no = mp_l.record_no
+                WHERE mp_l.region = p_region
+                  AND mp_l.user_no = v_part.user_no
+                  AND mp_l.record_no > v_cp_prev.checkpoint_record_no
+                  AND mp_l.record_no <= v_cp_curr.checkpoint_record_no
+                  AND m_l.match_date IS NOT NULL
+                  AND m_l.match_date < v_cp_prev.checkpoint_at - INTERVAL '2 seconds'
+              ) INTO v_has_late_pre;
+
+              IF NOT v_has_late_pre THEN
+                v_dw := v_cp_curr.win_count - v_cp_prev.win_count;
+                v_dl := v_cp_curr.lose_count - v_cp_prev.lose_count;
+                v_dd := v_cp_curr.draw_count - v_cp_prev.draw_count;
+
+                SELECT
+                  COUNT(*) FILTER (WHERE out_c = 'w')::int,
+                  COUNT(*) FILTER (WHERE out_c = 'l')::int,
+                  COUNT(*) FILTER (WHERE out_c = 'd')::int
+                INTO v_int_w, v_int_l, v_int_d
+                FROM (
+                  SELECT
+                    CASE
+                      WHEN mp_i.is_winner THEN 'w'
+                      WHEN EXISTS (
+                        SELECT 1
+                        FROM solare_match_players w_i
+                        WHERE w_i.region = mp_i.region
+                          AND w_i.record_no = mp_i.record_no
+                          AND w_i.is_winner
+                      ) THEN 'l'
+                      ELSE 'd'
+                    END AS out_c
+                  FROM solare_match_players mp_i
+                  LEFT JOIN solare_matches m_i
+                    ON m_i.region = mp_i.region AND m_i.record_no = mp_i.record_no
+                  LEFT JOIN solare_match_mode_proofs pr_i
+                    ON pr_i.region = mp_i.region AND pr_i.record_no = mp_i.record_no
+                  WHERE mp_i.region = p_region
+                    AND mp_i.user_no = v_part.user_no
+                    AND mp_i.record_no > v_cp_prev.checkpoint_record_no
+                    AND mp_i.record_no <= v_cp_curr.checkpoint_record_no
+                    AND COALESCE(pr_i.mode, '') <> 'practice'
+                    AND (
+                      m_i.record_no IS NULL
+                      OR COALESCE(m_i.season, 9) = COALESCE(v_part.season, v_target_season)
+                    )
+                ) sub_i;
+
+                IF v_int_w >= v_dw AND v_int_l >= v_dl AND v_int_d >= v_dd THEN
+                  IF (v_part.outcome = 'w' AND v_int_w <= v_dw)
+                     OR (v_part.outcome = 'l' AND v_int_l <= v_dl)
+                     OR (v_part.outcome = 'd' AND v_int_d <= v_dd) THEN
+                    RETURN TRUE;
+                  END IF;
+                END IF;
+              END IF;
+            END IF;
+          END IF;
+        END IF;
+
+        -- 2. Season-wide contradiction (only when participant has zero missing historical games across W/L/D)
+        SELECT
+          COUNT(*) FILTER (WHERE out_s = 'w')::int,
+          COUNT(*) FILTER (WHERE out_s = 'l')::int,
+          COUNT(*) FILTER (WHERE out_s = 'd')::int
+        INTO v_tot_w, v_tot_l, v_tot_d
+        FROM (
+          SELECT
+            CASE
+              WHEN mp_cnt.is_winner THEN 'w'
+              WHEN EXISTS (
+                SELECT 1
+                FROM solare_match_players w_cnt
+                WHERE w_cnt.region = mp_cnt.region
+                  AND w_cnt.record_no = mp_cnt.record_no
+                  AND w_cnt.is_winner
+              ) THEN 'l'
+              ELSE 'd'
+            END AS out_s
+          FROM solare_match_players mp_cnt
+          LEFT JOIN solare_matches m_cnt
+            ON m_cnt.region = mp_cnt.region AND m_cnt.record_no = mp_cnt.record_no
+          LEFT JOIN solare_match_mode_proofs pr_cnt
+            ON pr_cnt.region = mp_cnt.region AND pr_cnt.record_no = mp_cnt.record_no
+          WHERE mp_cnt.region = p_region
+            AND (
+              (v_part.user_no IS NOT NULL AND mp_cnt.user_no = v_part.user_no)
+              OR ((v_part.user_no IS NULL OR mp_cnt.user_no IS NULL) AND LOWER(mp_cnt.user_nickname) = LOWER(v_part.user_nickname))
+            )
+            AND COALESCE(pr_cnt.mode, '') <> 'practice'
+            AND (
+              m_cnt.record_no IS NULL
+              OR COALESCE(m_cnt.season, 9) = COALESCE(v_part.season, v_target_season)
+            )
+        ) sub_s;
+
+        IF v_tot_w >= COALESCE(v_part.win_count, 0)
+           AND v_tot_l >= COALESCE(v_part.lose_count, 0)
+           AND v_tot_d >= COALESCE(v_part.draw_count, 0) THEN
+          IF (v_part.outcome = 'w' AND v_tot_w <= COALESCE(v_part.win_count, 0))
+             OR (v_part.outcome = 'l' AND v_tot_l <= COALESCE(v_part.lose_count, 0))
+             OR (v_part.outcome = 'd' AND v_tot_d <= COALESCE(v_part.draw_count, 0)) THEN
+            RETURN TRUE;
+          END IF;
+        END IF;
+      END LOOP;
+
+      RETURN FALSE;
+    END;
+    $$ LANGUAGE plpgsql;
   `);
 
   pgm.sql(`
@@ -86,9 +346,7 @@ exports.up = (pgm) => {
             CONTINUE;
           END IF;
 
-          IF v_ev.season IS NOT NULL
-             AND v_player_season IS NOT NULL
-             AND v_ev.season <> v_player_season THEN
+          IF COALESCE(v_ev.season, 9) <> COALESCE(v_player_season, 9) THEN
             CONTINUE;
           END IF;
 
@@ -99,11 +357,7 @@ exports.up = (pgm) => {
             AND e2.user_no = v_ev.user_no
             AND e2.record_no IS NOT NULL
             AND (v_epoch_id IS NULL OR e2.id >= v_epoch_id)
-            AND (
-              e2.season IS NULL
-              OR v_player_season IS NULL
-              OR e2.season = v_player_season
-            );
+            AND COALESCE(e2.season, 9) = COALESCE(v_player_season, 9);
 
           v_prev_record_no := NULLIF(
             GREATEST(
@@ -186,6 +440,850 @@ exports.up = (pgm) => {
   `);
 
   pgm.sql(`
+    CREATE OR REPLACE FUNCTION fn_process_solare_player_wl_checkpoint(
+      p_region VARCHAR,
+      p_user_no BIGINT
+    )
+    RETURNS BOOLEAN AS $$
+    DECLARE
+      v_player RECORD;
+      v_season SMALLINT;
+      v_snap_at TIMESTAMPTZ;
+      v_has_prior_cp BOOLEAN;
+      v_latest_cp_at TIMESTAMPTZ;
+      v_curr_max_rn BIGINT;
+      v_cp_prev RECORD;
+      v_cp_prev2 RECORD;
+      v_has_late_pre BOOLEAN;
+      v_dw INTEGER;
+      v_dl INTEGER;
+      v_dd INTEGER;
+      v_raw_stats RECORD;
+      v_win_stats RECORD;
+      v_rem_w INTEGER;
+      v_rem_l INTEGER;
+      v_rem_d INTEGER;
+      v_rem_total INTEGER;
+      v_cand_rec RECORD;
+      v_upper_bound INTEGER;
+      v_lower_bound INTEGER;
+      v_comb_w BIGINT;
+      v_comb_l BIGINT;
+      v_comb_d BIGINT;
+      v_combo_res RECORD;
+      v_rn BIGINT;
+      v_mutated BOOLEAN := FALSE;
+    BEGIN
+      IF p_user_no IS NULL THEN
+        RETURN FALSE;
+      END IF;
+
+      SELECT
+        region,
+        user_no,
+        user_nickname,
+        season,
+        current_ranking,
+        rank_rating,
+        rating_is_estimated,
+        rating_anchor_record_no,
+        win_count,
+        lose_count,
+        draw_count,
+        last_seen_at
+      INTO v_player
+      FROM solare_players
+      WHERE region = p_region
+        AND user_no = p_user_no
+      ORDER BY updated_at DESC
+      LIMIT 1
+      FOR UPDATE;
+
+      IF NOT FOUND
+         OR v_player.current_ranking IS NULL
+         OR v_player.current_ranking < 1
+         OR v_player.win_count IS NULL
+         OR v_player.lose_count IS NULL THEN
+        RETURN FALSE;
+      END IF;
+
+      v_season := COALESCE(v_player.season, 9);
+      v_snap_at := COALESCE(v_player.last_seen_at, timezone('utc', now()));
+
+      -- Clear checkpoints from previous seasons or after an official counter reset
+      DELETE FROM solare_player_wl_checkpoints
+      WHERE region = v_player.region
+        AND user_no = v_player.user_no
+        AND (
+          season <> v_season
+          OR win_count > COALESCE(v_player.win_count, 0)
+          OR lose_count > COALESCE(v_player.lose_count, 0)
+          OR draw_count > COALESCE(v_player.draw_count, 0)
+        );
+
+      SELECT
+        COUNT(*) > 0,
+        MAX(checkpoint_at)
+      INTO
+        v_has_prior_cp,
+        v_latest_cp_at
+      FROM solare_player_wl_checkpoints
+      WHERE region = v_player.region
+        AND user_no = v_player.user_no
+        AND season = v_season;
+
+      -- Require strict causal synchronization for incremental updates (match_date <= last_seen_at),
+      -- and 10s tolerance only when recording the initial baseline checkpoint.
+      IF EXISTS (
+        SELECT 1
+        FROM solare_match_players mp_post
+        INNER JOIN solare_matches m_post
+          ON m_post.region = mp_post.region AND m_post.record_no = mp_post.record_no
+        LEFT JOIN solare_match_mode_proofs pr_post
+          ON pr_post.region = mp_post.region AND pr_post.record_no = mp_post.record_no
+        WHERE mp_post.region = v_player.region
+          AND COALESCE(pr_post.mode, '') <> 'practice'
+          AND (
+            mp_post.user_no = v_player.user_no
+            OR (mp_post.user_no IS NULL AND LOWER(mp_post.user_nickname) = LOWER(v_player.user_nickname))
+          )
+          AND COALESCE(m_post.season, 9) = v_season
+          AND m_post.match_date IS NOT NULL
+          AND m_post.match_date > (
+            CASE
+              WHEN v_has_prior_cp THEN v_snap_at
+              ELSE v_snap_at + INTERVAL '10 seconds'
+            END
+          )
+      ) THEN
+        RETURN FALSE;
+      END IF;
+
+      SELECT GREATEST(
+        COALESCE(MAX(mp.record_no), 0),
+        COALESCE(v_player.rating_anchor_record_no, 0)
+      )
+      INTO v_curr_max_rn
+      FROM solare_match_players mp
+      LEFT JOIN solare_matches m
+        ON m.region = mp.region AND m.record_no = mp.record_no
+      WHERE mp.region = v_player.region
+        AND (
+          mp.user_no = v_player.user_no
+          OR (mp.user_no IS NULL AND LOWER(mp.user_nickname) = LOWER(v_player.user_nickname))
+        )
+        AND (
+          m.record_no IS NULL
+          OR COALESCE(m.season, 9) = v_season
+        );
+
+      INSERT INTO solare_player_wl_checkpoints (
+        region,
+        user_no,
+        season,
+        checkpoint_record_no,
+        checkpoint_at,
+        win_count,
+        lose_count,
+        draw_count,
+        checkpoint_rating,
+        checkpoint_rating_is_estimated,
+        updated_at
+      )
+      VALUES (
+        v_player.region,
+        v_player.user_no,
+        v_season,
+        v_curr_max_rn,
+        v_snap_at,
+        COALESCE(v_player.win_count, 0),
+        COALESCE(v_player.lose_count, 0),
+        COALESCE(v_player.draw_count, 0),
+        v_player.rank_rating,
+        COALESCE(v_player.rating_is_estimated, FALSE),
+        timezone('utc', now())
+      )
+      ON CONFLICT (region, user_no, season, checkpoint_record_no) DO UPDATE
+      SET
+        checkpoint_at = EXCLUDED.checkpoint_at,
+        win_count = EXCLUDED.win_count,
+        lose_count = EXCLUDED.lose_count,
+        draw_count = EXCLUDED.draw_count,
+        checkpoint_rating = EXCLUDED.checkpoint_rating,
+        checkpoint_rating_is_estimated = EXCLUDED.checkpoint_rating_is_estimated,
+        updated_at = timezone('utc', now());
+
+      LOOP
+        SELECT *
+        INTO v_cp_prev
+        FROM solare_player_wl_checkpoints
+        WHERE region = v_player.region
+          AND user_no = v_player.user_no
+          AND season = v_season
+          AND checkpoint_record_no < v_curr_max_rn
+        ORDER BY checkpoint_record_no DESC
+        LIMIT 1;
+
+        IF NOT FOUND THEN
+          RETURN v_mutated;
+        END IF;
+
+        -- Guard against pre-checkpoint matches that were crawled after the previous checkpoint timestamp
+        SELECT EXISTS (
+          SELECT 1
+          FROM solare_match_players mp_l
+          INNER JOIN solare_matches m_l
+            ON m_l.region = mp_l.region AND m_l.record_no = mp_l.record_no
+          WHERE mp_l.region = v_player.region
+            AND (
+              mp_l.user_no = v_player.user_no
+              OR (mp_l.user_no IS NULL AND LOWER(mp_l.user_nickname) = LOWER(v_player.user_nickname))
+            )
+            AND mp_l.record_no > v_cp_prev.checkpoint_record_no
+            AND mp_l.record_no <= v_curr_max_rn
+            AND m_l.match_date IS NOT NULL
+            AND m_l.match_date < v_cp_prev.checkpoint_at - INTERVAL '2 seconds'
+        ) INTO v_has_late_pre;
+
+        IF v_has_late_pre THEN
+          RETURN v_mutated;
+        END IF;
+
+        v_dw := COALESCE(v_player.win_count, 0) - v_cp_prev.win_count;
+        v_dl := COALESCE(v_player.lose_count, 0) - v_cp_prev.lose_count;
+        v_dd := COALESCE(v_player.draw_count, 0) - v_cp_prev.draw_count;
+
+        -- Real-time self-healing if an in-place or lagged checkpoint update increased official W/L/D
+        -- (including partial refreshes 0 < dW < raw_w where previous proofs over-excluded non_prac_w < dW)
+        SELECT
+          COUNT(*) FILTER (WHERE out_r = 'w')::int AS raw_w,
+          COUNT(*) FILTER (WHERE out_r = 'l')::int AS raw_l,
+          COUNT(*) FILTER (WHERE out_r = 'd')::int AS raw_d,
+          COUNT(*) FILTER (WHERE NOT is_cp_prac AND out_r = 'w')::int AS non_prac_w,
+          COUNT(*) FILTER (WHERE NOT is_cp_prac AND out_r = 'l')::int AS non_prac_l,
+          COUNT(*) FILTER (WHERE NOT is_cp_prac AND out_r = 'd')::int AS non_prac_d
+        INTO v_raw_stats
+        FROM (
+          SELECT
+            CASE
+              WHEN mp.is_winner THEN 'w'
+              WHEN EXISTS (
+                SELECT 1
+                FROM solare_match_players w
+                WHERE w.region = mp.region
+                  AND w.record_no = mp.record_no
+                  AND w.is_winner
+              ) THEN 'l'
+              ELSE 'd'
+            END AS out_r,
+            (COALESCE(pr.mode, '') = 'practice') AS is_cp_prac
+          FROM solare_match_players mp
+          LEFT JOIN solare_matches m
+            ON m.region = mp.region AND m.record_no = mp.record_no
+          LEFT JOIN solare_match_mode_proofs pr
+            ON pr.region = mp.region AND pr.record_no = mp.record_no
+          WHERE mp.region = v_player.region
+            AND mp.record_no > v_cp_prev.checkpoint_record_no
+            AND mp.record_no <= v_curr_max_rn
+            AND NOT (
+              COALESCE(pr.mode, '') = 'practice'
+              AND COALESCE(pr.method, '') NOT IN ('checkpoint_wl_delta', 'checkpoint_math')
+            )
+            AND (
+              mp.user_no = v_player.user_no
+              OR (mp.user_no IS NULL AND LOWER(mp.user_nickname) = LOWER(v_player.user_nickname))
+            )
+            AND (
+              m.record_no IS NULL
+              OR COALESCE(m.season, 9) = v_season
+            )
+        ) r_sub;
+
+        -- If official W/L/D jumped by more than the crawled matches in (v_cp_prev, v_curr_max_rn],
+        -- check whether v_cp_prev was recorded from a cached GetRankList snapshot that had falsely
+        -- proven a preceding match as Practice, and merge the two consecutive windows if so.
+        IF v_raw_stats.raw_w < v_dw OR v_raw_stats.raw_l < v_dl OR v_raw_stats.raw_d < v_dd THEN
+          SELECT *
+          INTO v_cp_prev2
+          FROM solare_player_wl_checkpoints
+          WHERE region = v_player.region
+            AND user_no = v_player.user_no
+            AND season = v_season
+            AND checkpoint_record_no < v_cp_prev.checkpoint_record_no
+          ORDER BY checkpoint_record_no DESC
+          LIMIT 1;
+
+          IF FOUND AND EXISTS (
+            SELECT 1
+            FROM solare_match_mode_proofs pr_p
+            INNER JOIN solare_match_players mp_p
+              ON mp_p.region = pr_p.region AND mp_p.record_no = pr_p.record_no
+            WHERE pr_p.region = v_player.region
+              AND pr_p.record_no > v_cp_prev2.checkpoint_record_no
+              AND pr_p.record_no <= v_cp_prev.checkpoint_record_no
+              AND pr_p.mode = 'practice'
+              AND pr_p.method IN ('checkpoint_wl_delta', 'checkpoint_math')
+              AND (
+                mp_p.user_no = v_player.user_no
+                OR (mp_p.user_no IS NULL AND LOWER(mp_p.user_nickname) = LOWER(v_player.user_nickname))
+              )
+              AND (
+                (mp_p.is_winner AND v_raw_stats.raw_w < v_dw)
+                OR (
+                  NOT mp_p.is_winner
+                  AND EXISTS (
+                    SELECT 1
+                    FROM solare_match_players w_p
+                    WHERE w_p.region = mp_p.region
+                      AND w_p.record_no = mp_p.record_no
+                      AND w_p.is_winner
+                  )
+                  AND v_raw_stats.raw_l < v_dl
+                )
+                OR (
+                  NOT EXISTS (
+                    SELECT 1
+                    FROM solare_match_players w_p2
+                    WHERE w_p2.region = mp_p.region
+                      AND w_p2.record_no = mp_p.record_no
+                      AND w_p2.is_winner
+                  )
+                  AND v_raw_stats.raw_d < v_dd
+                )
+              )
+          ) THEN
+            DELETE FROM solare_player_wl_checkpoints
+            WHERE region = v_player.region
+              AND user_no = v_player.user_no
+              AND season = v_season
+              AND checkpoint_record_no = v_cp_prev.checkpoint_record_no;
+
+            v_mutated := TRUE;
+            CONTINUE;
+          END IF;
+        END IF;
+
+        EXIT;
+      END LOOP;
+
+      IF v_raw_stats.raw_w <= v_dw
+         OR v_raw_stats.non_prac_w < v_dw
+         OR v_raw_stats.raw_l <= v_dl
+         OR v_raw_stats.non_prac_l < v_dl
+         OR v_raw_stats.raw_d <= v_dd
+         OR v_raw_stats.non_prac_d < v_dd THEN
+        FOR v_rn IN
+          DELETE FROM solare_match_mode_proofs pr_del
+          USING solare_match_players mp_del
+          WHERE pr_del.region = v_player.region
+            AND mp_del.region = pr_del.region
+            AND mp_del.record_no = pr_del.record_no
+            AND pr_del.record_no > v_cp_prev.checkpoint_record_no
+            AND pr_del.record_no <= v_curr_max_rn
+            AND pr_del.method IN ('checkpoint_wl_delta', 'checkpoint_math')
+            AND (
+              mp_del.user_no = v_player.user_no
+              OR (mp_del.user_no IS NULL AND LOWER(mp_del.user_nickname) = LOWER(v_player.user_nickname))
+            )
+            AND (
+              (mp_del.is_winner AND (v_raw_stats.raw_w <= v_dw OR v_raw_stats.non_prac_w < v_dw))
+              OR (
+                NOT mp_del.is_winner
+                AND EXISTS (
+                  SELECT 1
+                  FROM solare_match_players w_d
+                  WHERE w_d.region = mp_del.region
+                    AND w_d.record_no = mp_del.record_no
+                    AND w_d.is_winner
+                )
+                AND (v_raw_stats.raw_l <= v_dl OR v_raw_stats.non_prac_l < v_dl)
+              )
+              OR (
+                NOT EXISTS (
+                  SELECT 1
+                  FROM solare_match_players w_d2
+                  WHERE w_d2.region = mp_del.region
+                    AND w_d2.record_no = mp_del.record_no
+                    AND w_d2.is_winner
+                )
+                AND (v_raw_stats.raw_d <= v_dd OR v_raw_stats.non_prac_d < v_dd)
+              )
+            )
+          RETURNING pr_del.record_no
+        LOOP
+          v_mutated := TRUE;
+        END LOOP;
+      END IF;
+
+      -- 1. Deterministic pigeonhole proof per outcome when remaining official Ranked slots in the window == 0
+      WITH win_matches AS (
+        SELECT
+          mp.record_no,
+          NULLIF(TRIM(m.repz_download_url), '') IS NOT NULL AS has_repz,
+          CASE
+            WHEN mp.is_winner THEN 'w'
+            WHEN EXISTS (
+              SELECT 1
+              FROM solare_match_players w
+              WHERE w.region = mp.region
+                AND w.record_no = mp.record_no
+                AND w.is_winner
+            ) THEN 'l'
+            ELSE 'd'
+          END AS outcome,
+          (pr.mode = 'practice') IS TRUE AS is_prac,
+          (pr.mode = 'ranked') IS TRUE AS is_ranked
+        FROM solare_match_players mp
+        LEFT JOIN solare_matches m
+          ON m.region = mp.region AND m.record_no = mp.record_no
+        LEFT JOIN solare_match_mode_proofs pr
+          ON pr.region = mp.region AND pr.record_no = mp.record_no
+        WHERE mp.region = v_player.region
+          AND mp.record_no > v_cp_prev.checkpoint_record_no
+          AND mp.record_no <= v_curr_max_rn
+          AND (
+            mp.user_no = v_player.user_no
+            OR (mp.user_no IS NULL AND LOWER(mp.user_nickname) = LOWER(v_player.user_nickname))
+          )
+          AND (
+            m.record_no IS NULL
+            OR COALESCE(m.season, 9) = v_season
+          )
+      )
+      SELECT
+        COUNT(*) FILTER (WHERE NOT is_prac AND outcome = 'w')::int AS non_prac_w,
+        COUNT(*) FILTER (WHERE NOT is_prac AND outcome = 'l')::int AS non_prac_l,
+        COUNT(*) FILTER (WHERE NOT is_prac AND outcome = 'd')::int AS non_prac_d,
+        COUNT(*) FILTER (WHERE NOT is_prac AND NOT is_ranked AND NOT has_repz AND outcome = 'w')::int AS cand_w,
+        COUNT(*) FILTER (WHERE NOT is_prac AND NOT is_ranked AND NOT has_repz AND outcome = 'l')::int AS cand_l,
+        COUNT(*) FILTER (WHERE NOT is_prac AND NOT is_ranked AND NOT has_repz AND outcome = 'd')::int AS cand_d
+      INTO v_win_stats
+      FROM win_matches;
+
+      v_rem_w := v_win_stats.non_prac_w - v_dw;
+      v_rem_l := v_win_stats.non_prac_l - v_dl;
+      v_rem_d := v_win_stats.non_prac_d - v_dd;
+
+      IF (v_dw >= 0 AND v_rem_w > 0 AND v_win_stats.cand_w = v_rem_w)
+         OR (v_dl >= 0 AND v_rem_l > 0 AND v_win_stats.cand_l = v_rem_l)
+         OR (v_dd >= 0 AND v_rem_d > 0 AND v_win_stats.cand_d = v_rem_d) THEN
+        FOR v_cand_rec IN
+          SELECT
+            mp.record_no,
+            CASE
+              WHEN mp.is_winner THEN 'w'
+              WHEN EXISTS (
+                SELECT 1
+                FROM solare_match_players w
+                WHERE w.region = mp.region
+                  AND w.record_no = mp.record_no
+                  AND w.is_winner
+              ) THEN 'l'
+              ELSE 'd'
+            END AS outcome
+          FROM solare_match_players mp
+          LEFT JOIN solare_matches m
+            ON m.region = mp.region AND m.record_no = mp.record_no
+          LEFT JOIN solare_match_mode_proofs pr
+            ON pr.region = mp.region AND pr.record_no = mp.record_no
+          WHERE mp.region = v_player.region
+            AND mp.record_no > v_cp_prev.checkpoint_record_no
+            AND mp.record_no <= v_curr_max_rn
+            AND COALESCE(pr.mode, '') NOT IN ('practice', 'ranked')
+            AND NULLIF(TRIM(m.repz_download_url), '') IS NULL
+            AND (
+              mp.user_no = v_player.user_no
+              OR (mp.user_no IS NULL AND LOWER(mp.user_nickname) = LOWER(v_player.user_nickname))
+            )
+            AND (
+              m.record_no IS NULL
+              OR COALESCE(m.season, 9) = v_season
+            )
+          ORDER BY mp.record_no ASC
+        LOOP
+          IF (
+               (v_cand_rec.outcome = 'w' AND v_dw >= 0 AND v_rem_w > 0 AND v_win_stats.cand_w = v_rem_w)
+               OR (v_cand_rec.outcome = 'l' AND v_dl >= 0 AND v_rem_l > 0 AND v_win_stats.cand_l = v_rem_l)
+               OR (v_cand_rec.outcome = 'd' AND v_dd >= 0 AND v_rem_d > 0 AND v_win_stats.cand_d = v_rem_d)
+             )
+             AND NOT fn_is_solare_practice_contradicted(
+               v_player.region,
+               v_cand_rec.record_no,
+               v_player.user_no,
+               v_player.user_nickname,
+               v_season
+             ) THEN
+            INSERT INTO solare_match_mode_proofs (region, record_no, mode, method)
+            VALUES (v_player.region, v_cand_rec.record_no, 'practice', 'checkpoint_wl_delta')
+            ON CONFLICT (region, record_no) DO NOTHING;
+
+            v_mutated := TRUE;
+          END IF;
+        END LOOP;
+      END IF;
+
+      -- 2. Combinatorial checkpoint rating solver when mixed Practice + Ranked games share the same window
+      WITH win_matches_after AS (
+        SELECT
+          mp.record_no,
+          mp.vary_rank_rating,
+          NULLIF(TRIM(m.repz_download_url), '') IS NOT NULL AS has_repz,
+          CASE
+            WHEN mp.is_winner THEN 'w'
+            WHEN EXISTS (
+              SELECT 1
+              FROM solare_match_players w
+              WHERE w.region = mp.region
+                AND w.record_no = mp.record_no
+                AND w.is_winner
+            ) THEN 'l'
+            ELSE 'd'
+          END AS outcome,
+          (pr.mode = 'practice') IS TRUE AS is_prac,
+          (pr.mode = 'ranked') IS TRUE AS is_ranked
+        FROM solare_match_players mp
+        LEFT JOIN solare_matches m
+          ON m.region = mp.region AND m.record_no = mp.record_no
+        LEFT JOIN solare_match_mode_proofs pr
+          ON pr.region = mp.region AND pr.record_no = mp.record_no
+        WHERE mp.region = v_player.region
+          AND mp.record_no > v_cp_prev.checkpoint_record_no
+          AND mp.record_no <= v_curr_max_rn
+          AND (
+            mp.user_no = v_player.user_no
+            OR (mp.user_no IS NULL AND LOWER(mp.user_nickname) = LOWER(v_player.user_nickname))
+          )
+          AND (
+            m.record_no IS NULL
+            OR COALESCE(m.season, 9) = v_season
+          )
+      )
+      SELECT
+        COUNT(*) FILTER (WHERE NOT is_prac AND outcome = 'w')::int AS non_prac_w,
+        COUNT(*) FILTER (WHERE NOT is_prac AND outcome = 'l')::int AS non_prac_l,
+        COUNT(*) FILTER (WHERE NOT is_prac AND outcome = 'd')::int AS non_prac_d,
+        COUNT(*) FILTER (WHERE NOT is_prac AND NOT is_ranked AND NOT has_repz AND outcome = 'w')::int AS cand_w,
+        COUNT(*) FILTER (WHERE NOT is_prac AND NOT is_ranked AND NOT has_repz AND outcome = 'l')::int AS cand_l,
+        COUNT(*) FILTER (WHERE NOT is_prac AND NOT is_ranked AND NOT has_repz AND outcome = 'd')::int AS cand_d,
+        COUNT(*) FILTER (WHERE NOT is_prac AND vary_rank_rating IS NULL)::int AS null_pdl_count,
+        COALESCE(SUM(vary_rank_rating) FILTER (WHERE NOT is_prac AND vary_rank_rating IS NOT NULL), 0)::int AS non_prac_delta
+      INTO v_win_stats
+      FROM win_matches_after;
+
+      v_rem_w := v_win_stats.non_prac_w - v_dw;
+      v_rem_l := v_win_stats.non_prac_l - v_dl;
+      v_rem_d := v_win_stats.non_prac_d - v_dd;
+      v_rem_total := v_rem_w + v_rem_l + v_rem_d;
+
+      IF v_rem_w >= 0
+         AND v_rem_l >= 0
+         AND v_rem_d >= 0
+         AND v_rem_total BETWEEN 1 AND 4
+         AND v_win_stats.null_pdl_count = 0
+         AND v_win_stats.cand_w >= v_rem_w
+         AND v_win_stats.cand_l >= v_rem_l
+         AND v_win_stats.cand_d >= v_rem_d
+         AND v_cp_prev.checkpoint_rating IS NOT NULL
+         AND NOT COALESCE(v_cp_prev.checkpoint_rating_is_estimated, FALSE) THEN
+
+        SELECT x.rank_rating
+        INTO v_upper_bound
+        FROM (
+          SELECT DISTINCT ON (sp_up.current_ranking)
+            sp_up.user_no,
+            sp_up.user_nickname,
+            sp_up.season,
+            sp_up.current_ranking,
+            sp_up.rank_rating,
+            sp_up.rating_is_estimated,
+            sp_up.last_seen_at
+          FROM solare_players sp_up
+          WHERE sp_up.region = v_player.region
+            AND sp_up.user_no IS DISTINCT FROM v_player.user_no
+            AND sp_up.current_ranking IS NOT NULL
+            AND sp_up.current_ranking < v_player.current_ranking
+            AND (
+              sp_up.season = v_season
+              OR (v_season = 9 AND sp_up.season IS NULL)
+            )
+          ORDER BY
+            sp_up.current_ranking DESC,
+            sp_up.last_seen_at DESC NULLS LAST,
+            sp_up.updated_at DESC NULLS LAST
+        ) x
+        WHERE x.rank_rating IS NOT NULL
+          AND NOT COALESCE(x.rating_is_estimated, FALSE)
+          AND (
+            x.last_seen_at IS NULL
+            OR NOT EXISTS (
+              SELECT 1
+              FROM solare_match_players mp_p
+              INNER JOIN solare_matches m_p
+                ON m_p.region = mp_p.region AND m_p.record_no = mp_p.record_no
+              LEFT JOIN solare_match_mode_proofs pr_p
+                ON pr_p.region = mp_p.region AND pr_p.record_no = mp_p.record_no
+              WHERE mp_p.region = v_player.region
+                AND COALESCE(pr_p.mode, '') <> 'practice'
+                AND COALESCE(m_p.season, 9) = v_season
+                AND (
+                  (x.user_no IS NOT NULL AND mp_p.user_no = x.user_no)
+                  OR ((x.user_no IS NULL OR mp_p.user_no IS NULL) AND LOWER(mp_p.user_nickname) = LOWER(x.user_nickname))
+                )
+                AND m_p.match_date IS NOT NULL
+                AND m_p.match_date > x.last_seen_at + INTERVAL '10 seconds'
+            )
+          )
+        ORDER BY x.current_ranking DESC
+        LIMIT 1;
+
+        SELECT x.rank_rating
+        INTO v_lower_bound
+        FROM (
+          SELECT DISTINCT ON (sp_low.current_ranking)
+            sp_low.user_no,
+            sp_low.user_nickname,
+            sp_low.season,
+            sp_low.current_ranking,
+            sp_low.rank_rating,
+            sp_low.rating_is_estimated,
+            sp_low.last_seen_at
+          FROM solare_players sp_low
+          WHERE sp_low.region = v_player.region
+            AND sp_low.user_no IS DISTINCT FROM v_player.user_no
+            AND sp_low.current_ranking IS NOT NULL
+            AND sp_low.current_ranking > v_player.current_ranking
+            AND (
+              sp_low.season = v_season
+              OR (v_season = 9 AND sp_low.season IS NULL)
+            )
+          ORDER BY
+            sp_low.current_ranking ASC,
+            sp_low.last_seen_at DESC NULLS LAST,
+            sp_low.updated_at DESC NULLS LAST
+        ) x
+        WHERE x.rank_rating IS NOT NULL
+          AND NOT COALESCE(x.rating_is_estimated, FALSE)
+          AND (
+            x.last_seen_at IS NULL
+            OR NOT EXISTS (
+              SELECT 1
+              FROM solare_match_players mp_p
+              INNER JOIN solare_matches m_p
+                ON m_p.region = mp_p.region AND m_p.record_no = mp_p.record_no
+              LEFT JOIN solare_match_mode_proofs pr_p
+                ON pr_p.region = mp_p.region AND pr_p.record_no = mp_p.record_no
+              WHERE mp_p.region = v_player.region
+                AND COALESCE(pr_p.mode, '') <> 'practice'
+                AND COALESCE(m_p.season, 9) = v_season
+                AND (
+                  (x.user_no IS NOT NULL AND mp_p.user_no = x.user_no)
+                  OR ((x.user_no IS NULL OR mp_p.user_no IS NULL) AND LOWER(mp_p.user_nickname) = LOWER(x.user_nickname))
+                )
+                AND m_p.match_date IS NOT NULL
+                AND m_p.match_date > x.last_seen_at + INTERVAL '10 seconds'
+            )
+          )
+        ORDER BY x.current_ranking ASC
+        LIMIT 1;
+
+        IF v_lower_bound IS NOT NULL
+           AND (v_player.current_ranking = 1 OR (v_upper_bound IS NOT NULL AND v_upper_bound >= v_lower_bound)) THEN
+          v_comb_w := CASE v_rem_w
+            WHEN 0 THEN 1
+            WHEN 1 THEN v_win_stats.cand_w
+            WHEN 2 THEN (v_win_stats.cand_w::bigint * (v_win_stats.cand_w - 1)) / 2
+            WHEN 3 THEN (v_win_stats.cand_w::bigint * (v_win_stats.cand_w - 1) * (v_win_stats.cand_w - 2)) / 6
+            ELSE (v_win_stats.cand_w::bigint * (v_win_stats.cand_w - 1) * (v_win_stats.cand_w - 2) * (v_win_stats.cand_w - 3)) / 24
+          END;
+          v_comb_l := CASE v_rem_l
+            WHEN 0 THEN 1
+            WHEN 1 THEN v_win_stats.cand_l
+            WHEN 2 THEN (v_win_stats.cand_l::bigint * (v_win_stats.cand_l - 1)) / 2
+            WHEN 3 THEN (v_win_stats.cand_l::bigint * (v_win_stats.cand_l - 1) * (v_win_stats.cand_l - 2)) / 6
+            ELSE (v_win_stats.cand_l::bigint * (v_win_stats.cand_l - 1) * (v_win_stats.cand_l - 2) * (v_win_stats.cand_l - 3)) / 24
+          END;
+          v_comb_d := CASE v_rem_d
+            WHEN 0 THEN 1
+            WHEN 1 THEN v_win_stats.cand_d
+            WHEN 2 THEN (v_win_stats.cand_d::bigint * (v_win_stats.cand_d - 1)) / 2
+            WHEN 3 THEN (v_win_stats.cand_d::bigint * (v_win_stats.cand_d - 1) * (v_win_stats.cand_d - 2)) / 6
+            ELSE (v_win_stats.cand_d::bigint * (v_win_stats.cand_d - 1) * (v_win_stats.cand_d - 2) * (v_win_stats.cand_d - 3)) / 24
+          END;
+
+          IF (v_comb_w * v_comb_l * v_comb_d) BETWEEN 1 AND 5000 THEN
+            WITH RECURSIVE
+            win_cand AS (
+              SELECT
+                mp.record_no,
+                mp.vary_rank_rating::int AS v,
+                CASE
+                  WHEN mp.is_winner THEN 'w'
+                  WHEN EXISTS (
+                    SELECT 1
+                    FROM solare_match_players w
+                    WHERE w.region = mp.region
+                      AND w.record_no = mp.record_no
+                      AND w.is_winner
+                  ) THEN 'l'
+                  ELSE 'd'
+                END AS outcome,
+                fn_is_solare_practice_contradicted(
+                  v_player.region,
+                  mp.record_no,
+                  v_player.user_no,
+                  v_player.user_nickname,
+                  v_season
+                ) AS is_contradicted
+              FROM solare_match_players mp
+              LEFT JOIN solare_matches m
+                ON m.region = mp.region AND m.record_no = mp.record_no
+              LEFT JOIN solare_match_mode_proofs pr
+                ON pr.region = mp.region AND pr.record_no = mp.record_no
+              WHERE mp.region = v_player.region
+                AND mp.record_no > v_cp_prev.checkpoint_record_no
+                AND mp.record_no <= v_curr_max_rn
+                AND COALESCE(pr.mode, '') NOT IN ('practice', 'ranked')
+                AND NULLIF(TRIM(m.repz_download_url), '') IS NULL
+                AND (
+                  mp.user_no = v_player.user_no
+                  OR (mp.user_no IS NULL AND LOWER(mp.user_nickname) = LOWER(v_player.user_nickname))
+                )
+                AND (
+                  m.record_no IS NULL
+                  OR COALESCE(m.season, 9) = v_season
+                )
+            ),
+            cand_w AS (
+              SELECT ROW_NUMBER() OVER (ORDER BY record_no)::int AS idx, record_no, v, is_contradicted
+              FROM win_cand
+              WHERE outcome = 'w' AND v_rem_w > 0
+            ),
+            comb_w(last_idx, depth, rns, sum_v, has_contra) AS (
+              SELECT 0, 0, ARRAY[]::bigint[], 0, FALSE
+              UNION ALL
+              SELECT cw.idx, c.depth + 1, c.rns || cw.record_no, c.sum_v + cw.v, (c.has_contra OR cw.is_contradicted)
+              FROM comb_w c
+              INNER JOIN cand_w cw ON cw.idx > c.last_idx
+              WHERE c.depth < v_rem_w
+            ),
+            cand_l AS (
+              SELECT ROW_NUMBER() OVER (ORDER BY record_no)::int AS idx, record_no, v, is_contradicted
+              FROM win_cand
+              WHERE outcome = 'l' AND v_rem_l > 0
+            ),
+            comb_l(last_idx, depth, rns, sum_v, has_contra) AS (
+              SELECT 0, 0, ARRAY[]::bigint[], 0, FALSE
+              UNION ALL
+              SELECT cl.idx, c.depth + 1, c.rns || cl.record_no, c.sum_v + cl.v, (c.has_contra OR cl.is_contradicted)
+              FROM comb_l c
+              INNER JOIN cand_l cl ON cl.idx > c.last_idx
+              WHERE c.depth < v_rem_l
+            ),
+            cand_d AS (
+              SELECT ROW_NUMBER() OVER (ORDER BY record_no)::int AS idx, record_no, v, is_contradicted
+              FROM win_cand
+              WHERE outcome = 'd' AND v_rem_d > 0
+            ),
+            comb_d(last_idx, depth, rns, sum_v, has_contra) AS (
+              SELECT 0, 0, ARRAY[]::bigint[], 0, FALSE
+              UNION ALL
+              SELECT cd.idx, c.depth + 1, c.rns || cd.record_no, c.sum_v + cd.v, (c.has_contra OR cd.is_contradicted)
+              FROM comb_d c
+              INNER JOIN cand_d cd ON cd.idx > c.last_idx
+              WHERE c.depth < v_rem_d
+            ),
+            valid_combos AS (
+              SELECT
+                (vw.rns || vl.rns || vd.rns) AS excl_rns,
+                (vw.has_contra OR vl.has_contra OR vd.has_contra) AS has_contra
+              FROM (SELECT rns, sum_v, has_contra FROM comb_w WHERE depth = v_rem_w) vw
+              CROSS JOIN (SELECT rns, sum_v, has_contra FROM comb_l WHERE depth = v_rem_l) vl
+              CROSS JOIN (SELECT rns, sum_v, has_contra FROM comb_d WHERE depth = v_rem_d) vd
+              WHERE GREATEST(0, v_cp_prev.checkpoint_rating + (v_win_stats.non_prac_delta - vw.sum_v - vl.sum_v - vd.sum_v)) >= v_lower_bound
+                AND (
+                  v_upper_bound IS NULL
+                  OR GREATEST(0, v_cp_prev.checkpoint_rating + (v_win_stats.non_prac_delta - vw.sum_v - vl.sum_v - vd.sum_v)) <= v_upper_bound
+                )
+            ),
+            combo_summary AS (
+              SELECT
+                COUNT(*)::int AS valid_count,
+                COUNT(*) FILTER (WHERE NOT has_contra)::int AS uncontradicted_valid_count
+              FROM valid_combos
+            ),
+            mandatory_prac AS (
+              SELECT x.rn
+              FROM valid_combos vc
+              CROSS JOIN LATERAL unnest(vc.excl_rns) AS x(rn)
+              CROSS JOIN combo_summary cs
+              WHERE cs.valid_count > 0
+              GROUP BY x.rn, cs.valid_count
+              HAVING COUNT(*) = cs.valid_count
+            ),
+            mandatory_ranked AS (
+              SELECT wc.record_no AS rn
+              FROM win_cand wc
+              CROSS JOIN combo_summary cs
+              WHERE cs.valid_count > 0
+                AND NOT EXISTS (
+                  SELECT 1
+                  FROM valid_combos vc
+                  WHERE wc.record_no = ANY(vc.excl_rns)
+                )
+            )
+            SELECT
+              cs.valid_count,
+              cs.uncontradicted_valid_count,
+              COALESCE((SELECT ARRAY_AGG(rn ORDER BY rn) FROM mandatory_prac), ARRAY[]::bigint[]) AS prac_rns,
+              COALESCE((SELECT ARRAY_AGG(rn ORDER BY rn) FROM mandatory_ranked), ARRAY[]::bigint[]) AS ranked_rns
+            INTO v_combo_res
+            FROM combo_summary cs;
+
+            IF v_combo_res.valid_count > 0 AND v_combo_res.uncontradicted_valid_count > 0 THEN
+              FOREACH v_rn IN ARRAY v_combo_res.prac_rns
+              LOOP
+                INSERT INTO solare_match_mode_proofs (region, record_no, mode, method)
+                VALUES (v_player.region, v_rn, 'practice', 'checkpoint_math')
+                ON CONFLICT (region, record_no) DO NOTHING;
+
+                v_mutated := TRUE;
+              END LOOP;
+
+              FOREACH v_rn IN ARRAY v_combo_res.ranked_rns
+              LOOP
+                INSERT INTO solare_match_mode_proofs (region, record_no, mode, method)
+                VALUES (v_player.region, v_rn, 'ranked', 'checkpoint_math')
+                ON CONFLICT (region, record_no) DO NOTHING;
+
+                v_mutated := TRUE;
+              END LOOP;
+            END IF;
+          END IF;
+        END IF;
+      END IF;
+
+      -- Refresh current checkpoint rating if any rollback/restoration mutated solare_players.rank_rating
+      IF v_mutated THEN
+        UPDATE solare_player_wl_checkpoints cp
+        SET
+          checkpoint_rating = sp.rank_rating,
+          checkpoint_rating_is_estimated = COALESCE(sp.rating_is_estimated, FALSE),
+          updated_at = timezone('utc', now())
+        FROM solare_players sp
+        WHERE cp.region = v_player.region
+          AND cp.user_no = v_player.user_no
+          AND cp.season = v_season
+          AND cp.checkpoint_record_no = v_curr_max_rn
+          AND sp.region = v_player.region
+          AND sp.user_no = v_player.user_no;
+      END IF;
+
+      RETURN v_mutated;
+    END;
+    $$ LANGUAGE plpgsql;
+  `);
+
+  pgm.sql(`
     CREATE OR REPLACE FUNCTION fn_infer_unseeded_solare_player_rating(
       p_region VARCHAR,
       p_user_no BIGINT,
@@ -209,6 +1307,7 @@ exports.up = (pgm) => {
       v_comb_d BIGINT;
       v_combo_res RECORD;
       v_prac_rn BIGINT;
+      v_ranked_rn BIGINT;
       v_newly_proven_count INTEGER := 0;
       v_math_solved BOOLEAN := FALSE;
       v_use_excluded BOOLEAN := FALSE;
@@ -260,13 +1359,21 @@ exports.up = (pgm) => {
         RETURN FALSE;
       END IF;
 
-      IF v_player.rank_rating IS NOT NULL THEN
+      IF v_player.rank_rating IS NOT NULL AND NOT COALESCE(v_player.rating_is_estimated, FALSE) THEN
         SELECT EXISTS (
           SELECT 1
-          FROM solare_player_rating_events
-          WHERE region = v_player.region
-            AND user_no = v_player.user_no
-            AND event_type = 'inferred_start'
+          FROM solare_player_rating_events e
+          WHERE e.region = v_player.region
+            AND e.user_no = v_player.user_no
+            AND e.event_type = 'inferred_start'
+            AND COALESCE(e.season, 9) = COALESCE(v_player.season, 9)
+            AND e.id > COALESCE((
+              SELECT MAX(ep.id)
+              FROM solare_player_rating_events ep
+              WHERE ep.region = v_player.region
+                AND ep.user_no = v_player.user_no
+                AND ep.event_type IN ('season_reset', 'seed_anchor', 'reconcile')
+            ), 0)
         ) INTO v_has_inferred_event;
 
         IF NOT v_has_inferred_event THEN
@@ -274,7 +1381,7 @@ exports.up = (pgm) => {
         END IF;
       END IF;
 
-      -- Apenas vizinhos com rating EXATO (não estimado) e sincronizados com o snapshot servem de limite duro
+      -- Only synchronized non-estimated neighbors act as hard mathematical bounds
       SELECT x.rank_rating, x.current_ranking
       INTO v_upper_bound, v_upper_rank
       FROM (
@@ -316,11 +1423,7 @@ exports.up = (pgm) => {
               ON pr_post.region = mp_post.region AND pr_post.record_no = mp_post.record_no
             WHERE mp_post.region = v_player.region
               AND COALESCE(pr_post.mode, '') <> 'practice'
-              AND (
-                m_post.season IS NULL
-                OR x.season IS NULL
-                OR m_post.season = x.season
-              )
+              AND COALESCE(m_post.season, 9) = COALESCE(x.season, 9)
               AND (
                 (x.user_no IS NOT NULL AND mp_post.user_no = x.user_no)
                 OR ((x.user_no IS NULL OR mp_post.user_no IS NULL) AND LOWER(mp_post.user_nickname) = LOWER(x.user_nickname))
@@ -373,11 +1476,7 @@ exports.up = (pgm) => {
               ON pr_post.region = mp_post.region AND pr_post.record_no = mp_post.record_no
             WHERE mp_post.region = v_player.region
               AND COALESCE(pr_post.mode, '') <> 'practice'
-              AND (
-                m_post.season IS NULL
-                OR x.season IS NULL
-                OR m_post.season = x.season
-              )
+              AND COALESCE(m_post.season, 9) = COALESCE(x.season, 9)
               AND (
                 (x.user_no IS NOT NULL AND mp_post.user_no = x.user_no)
                 OR ((x.user_no IS NULL OR mp_post.user_no IS NULL) AND LOWER(mp_post.user_nickname) = LOWER(x.user_nickname))
@@ -428,9 +1527,8 @@ exports.up = (pgm) => {
           ON ps.region = mp.region AND ps.record_no = mp.record_no
         WHERE mp.region = v_player.region
           AND (
-            m.season IS NULL
-            OR v_player.season IS NULL
-            OR m.season = v_player.season
+            m.record_no IS NULL
+            OR COALESCE(m.season, 9) = COALESCE(v_player.season, 9)
           )
           AND (
             (v_player.user_no IS NOT NULL AND mp.user_no = v_player.user_no)
@@ -466,7 +1564,7 @@ exports.up = (pgm) => {
       v_rem_d := v_stats.non_prac_d - COALESCE(v_player.draw_count, 0);
       v_rem_total := v_rem_w + v_rem_l + v_rem_d;
 
-      -- Prova combinatória em tempo real quando há pequeno excesso (1..4) e W/L/D sincronizado
+      -- Real-time combinatorial proof when excess is small (1..4) and W/L/D is synchronized
       IF v_rem_w >= 0
          AND v_rem_l >= 0
          AND v_rem_d >= 0
@@ -518,122 +1616,12 @@ exports.up = (pgm) => {
                 ) THEN 'l'
                 ELSE 'd'
               END AS outcome,
-              EXISTS (
-                SELECT 1
-                FROM solare_match_players mp2
-                INNER JOIN solare_players sp2
-                  ON sp2.region = mp2.region
-                 AND (
-                   (mp2.user_no IS NOT NULL AND sp2.user_no = mp2.user_no)
-                   OR (mp2.user_no IS NULL AND LOWER(sp2.user_nickname) = LOWER(mp2.user_nickname))
-                 )
-                WHERE mp2.region = v_player.region
-                  AND mp2.record_no = mp.record_no
-                  AND NOT (
-                    (v_player.user_no IS NOT NULL AND sp2.user_no = v_player.user_no)
-                    OR (v_player.user_no IS NULL AND LOWER(sp2.user_nickname) = LOWER(v_player.user_nickname))
-                  )
-                  AND sp2.current_ranking IS NOT NULL
-                  AND sp2.current_ranking >= 1
-                  AND (
-                    sp2.season = COALESCE(v_player.season, 9)
-                    OR (COALESCE(v_player.season, 9) = 9 AND sp2.season IS NULL)
-                  )
-                  AND NOT EXISTS (
-                    SELECT 1
-                    FROM solare_players sp_newer
-                    WHERE sp_newer.region = sp2.region
-                      AND sp_newer.current_ranking = sp2.current_ranking
-                      AND NOT (
-                        (sp2.user_no IS NOT NULL AND sp_newer.user_no = sp2.user_no)
-                        OR (sp2.user_no IS NULL AND sp_newer.user_no IS NULL AND LOWER(sp_newer.user_nickname) = LOWER(sp2.user_nickname))
-                      )
-                      AND (
-                        sp_newer.season = COALESCE(v_player.season, 9)
-                        OR (COALESCE(v_player.season, 9) = 9 AND sp_newer.season IS NULL)
-                      )
-                      AND COALESCE(sp_newer.last_seen_at, sp_newer.updated_at) > COALESCE(sp2.last_seen_at, sp2.updated_at)
-                  )
-                  AND (
-                    sp2.last_seen_at IS NULL
-                    OR NOT EXISTS (
-                      SELECT 1
-                      FROM solare_match_players mp_post
-                      INNER JOIN solare_matches m_post
-                        ON m_post.region = mp_post.region AND m_post.record_no = mp_post.record_no
-                      LEFT JOIN solare_match_mode_proofs pr_post
-                        ON pr_post.region = mp_post.region AND pr_post.record_no = mp_post.record_no
-                      WHERE mp_post.region = sp2.region
-                        AND COALESCE(pr_post.mode, '') <> 'practice'
-                        AND (
-                          (sp2.user_no IS NOT NULL AND mp_post.user_no = sp2.user_no)
-                          OR ((sp2.user_no IS NULL OR mp_post.user_no IS NULL) AND LOWER(mp_post.user_nickname) = LOWER(sp2.user_nickname))
-                        )
-                        AND (
-                          m_post.season IS NULL
-                          OR sp2.season IS NULL
-                          OR m_post.season = sp2.season
-                        )
-                        AND m_post.match_date IS NOT NULL
-                        AND m_post.match_date > sp2.last_seen_at + INTERVAL '10 seconds'
-                    )
-                  )
-                  AND (
-                    SELECT COUNT(*)::int
-                    FROM solare_match_players mp_cnt
-                    LEFT JOIN solare_matches m_cnt
-                      ON m_cnt.region = mp_cnt.region AND m_cnt.record_no = mp_cnt.record_no
-                    LEFT JOIN solare_match_mode_proofs pr_cnt
-                      ON pr_cnt.region = mp_cnt.region AND pr_cnt.record_no = mp_cnt.record_no
-                    WHERE mp_cnt.region = sp2.region
-                      AND (
-                        (sp2.user_no IS NOT NULL AND mp_cnt.user_no = sp2.user_no)
-                        OR ((sp2.user_no IS NULL OR mp_cnt.user_no IS NULL) AND LOWER(mp_cnt.user_nickname) = LOWER(sp2.user_nickname))
-                      )
-                      AND COALESCE(pr_cnt.mode, '') <> 'practice'
-                      AND (
-                        m_cnt.season IS NULL
-                        OR sp2.season IS NULL
-                        OR m_cnt.season = sp2.season
-                      )
-                      AND (
-                        CASE
-                          WHEN mp_cnt.is_winner THEN 'w'
-                          WHEN EXISTS (
-                            SELECT 1
-                            FROM solare_match_players w_cnt
-                            WHERE w_cnt.region = mp_cnt.region
-                              AND w_cnt.record_no = mp_cnt.record_no
-                              AND w_cnt.is_winner
-                          ) THEN 'l'
-                          ELSE 'd'
-                        END
-                      ) = (
-                        CASE
-                          WHEN mp2.is_winner THEN 'w'
-                          WHEN EXISTS (
-                            SELECT 1
-                            FROM solare_match_players w2
-                            WHERE w2.region = mp2.region
-                              AND w2.record_no = mp2.record_no
-                              AND w2.is_winner
-                          ) THEN 'l'
-                          ELSE 'd'
-                        END
-                      )
-                  ) <= (
-                    CASE
-                      WHEN mp2.is_winner THEN COALESCE(sp2.win_count, 0)
-                      WHEN EXISTS (
-                        SELECT 1
-                        FROM solare_match_players w2
-                        WHERE w2.region = mp2.region
-                          AND w2.record_no = mp2.record_no
-                          AND w2.is_winner
-                      ) THEN COALESCE(sp2.lose_count, 0)
-                      ELSE COALESCE(sp2.draw_count, 0)
-                    END
-                  )
+              fn_is_solare_practice_contradicted(
+                v_player.region,
+                mp.record_no,
+                v_player.user_no,
+                v_player.user_nickname,
+                COALESCE(v_player.season, 9)
               ) AS is_contradicted
             FROM solare_match_players mp
             LEFT JOIN solare_matches m
@@ -644,9 +1632,8 @@ exports.up = (pgm) => {
               AND COALESCE(pr.mode, '') NOT IN ('practice', 'ranked')
               AND NULLIF(TRIM(m.repz_download_url), '') IS NULL
               AND (
-                m.season IS NULL
-                OR v_player.season IS NULL
-                OR m.season = v_player.season
+                m.record_no IS NULL
+                OR COALESCE(m.season, 9) = COALESCE(v_player.season, 9)
               )
               AND (
                 (v_player.user_no IS NOT NULL AND mp.user_no = v_player.user_no)
@@ -726,13 +1713,25 @@ exports.up = (pgm) => {
             WHERE cs.valid_count > 0
             GROUP BY x.rn, cs.valid_count
             HAVING COUNT(*) = cs.valid_count
+          ),
+          mandatory_ranked_rns AS (
+            SELECT pc.record_no AS rn
+            FROM player_cand pc
+            CROSS JOIN combo_summary cs
+            WHERE cs.valid_count > 0
+              AND NOT EXISTS (
+                SELECT 1
+                FROM valid_combos vc
+                WHERE pc.record_no = ANY(vc.excl_rns)
+              )
           )
           SELECT
             cs.valid_count,
             cs.uncontradicted_valid_count,
             cs.distinct_deltas,
             cs.sample_net_delta,
-            COALESCE((SELECT ARRAY_AGG(rn ORDER BY rn) FROM mandatory_rns), ARRAY[]::bigint[]) AS mandatory_practice_rns
+            COALESCE((SELECT ARRAY_AGG(rn ORDER BY rn) FROM mandatory_rns), ARRAY[]::bigint[]) AS mandatory_practice_rns,
+            COALESCE((SELECT ARRAY_AGG(rn ORDER BY rn) FROM mandatory_ranked_rns), ARRAY[]::bigint[]) AS mandatory_ranked_rns
           INTO v_combo_res
           FROM combo_summary cs;
 
@@ -744,6 +1743,13 @@ exports.up = (pgm) => {
               ON CONFLICT (region, record_no) DO NOTHING;
 
               v_newly_proven_count := v_newly_proven_count + 1;
+            END LOOP;
+
+            FOREACH v_ranked_rn IN ARRAY v_combo_res.mandatory_ranked_rns
+            LOOP
+              INSERT INTO solare_match_mode_proofs (region, record_no, mode, method)
+              VALUES (v_player.region, v_ranked_rn, 'ranked', 'trigger_math')
+              ON CONFLICT (region, record_no) DO NOTHING;
             END LOOP;
 
             IF v_combo_res.distinct_deltas = 1
@@ -765,9 +1771,8 @@ exports.up = (pgm) => {
               WHERE mp.region = v_player.region
                 AND COALESCE(pr.mode, '') <> 'practice'
                 AND (
-                  m.season IS NULL
-                  OR v_player.season IS NULL
-                  OR m.season = v_player.season
+                  m.record_no IS NULL
+                  OR COALESCE(m.season, 9) = COALESCE(v_player.season, 9)
                 )
                 AND (
                   (v_player.user_no IS NOT NULL AND mp.user_no = v_player.user_no)
@@ -779,8 +1784,8 @@ exports.up = (pgm) => {
       END IF;
 
       IF NOT v_math_solved THEN
-        -- Só ignora suspeitas heurísticas (não provadas) quando aproxima o W/L/D do oficial
-        -- sem deixar excesso e com no máximo 2 jogos de diferença.
+        -- Only exclude heuristic (unproven) suspect matches when doing so brings DB W/L/D strictly closer
+        -- to official counts, leaving zero excess and at most 2 games of difference.
         IF v_stats.suspect_count > 0 THEN
           v_dist_full :=
             ABS(v_stats.non_prac_w - COALESCE(v_player.win_count, 0))
@@ -809,7 +1814,7 @@ exports.up = (pgm) => {
           v_eff_pre_d := v_stats.pre_d;
         END IF;
 
-        -- Jamais inferir Elo exato por soma bruta quando ainda há excesso não resolvido pré-snapshot
+        -- Never infer an exact rating via raw sum while unresolved pre-snapshot excess remains
         v_has_unresolved_excess :=
           v_eff_pre_w > COALESCE(v_player.win_count, 0)
           OR v_eff_pre_l > COALESCE(v_player.lose_count, 0)
@@ -834,9 +1839,8 @@ exports.up = (pgm) => {
             AND mp.vary_rank_rating IS NOT NULL
             AND mp.vary_rank_rating <> 0
             AND (
-              m.season IS NULL
-              OR v_player.season IS NULL
-              OR m.season = v_player.season
+              m.record_no IS NULL
+              OR COALESCE(m.season, 9) = COALESCE(v_player.season, 9)
             )
             AND (
               (v_player.user_no IS NOT NULL AND mp.user_no = v_player.user_no)
@@ -886,7 +1890,7 @@ exports.up = (pgm) => {
         v_base_rating := v_cand_base;
         v_is_estimate := FALSE;
       ELSE
-        -- Fallback: interpolação linear entre vizinhos exatos coerentes a até 40 pontos de distância
+        -- Fallback: linear interpolation between consistent exact neighbors within 40 points
         IF v_upper_bound IS NULL
            OR v_lower_bound IS NULL
            OR v_upper_bound < v_lower_bound
@@ -913,10 +1917,18 @@ exports.up = (pgm) => {
         RETURN FALSE;
       END IF;
 
-      DELETE FROM solare_player_rating_events
-      WHERE region = v_player.region
-        AND user_no = v_player.user_no
-        AND event_type = 'inferred_start';
+      DELETE FROM solare_player_rating_events e
+      WHERE e.region = v_player.region
+        AND e.user_no = v_player.user_no
+        AND e.event_type = 'inferred_start'
+        AND COALESCE(e.season, 9) = COALESCE(v_player.season, 9)
+        AND e.id > COALESCE((
+          SELECT MAX(ep.id)
+          FROM solare_player_rating_events ep
+          WHERE ep.region = v_player.region
+            AND ep.user_no = v_player.user_no
+            AND ep.event_type IN ('season_reset', 'seed_anchor', 'reconcile')
+        ), 0);
 
       INSERT INTO solare_player_rating_events (
         region,
@@ -972,19 +1984,92 @@ exports.up = (pgm) => {
   pgm.sql(`
     CREATE OR REPLACE FUNCTION fn_trg_solare_player_infer_rating()
     RETURNS TRIGGER AS $$
+    DECLARE
+      v_snapshot_advanced BOOLEAN := FALSE;
     BEGIN
       IF pg_trigger_depth() > 1 THEN
         RETURN NEW;
       END IF;
 
-      IF NEW.current_ranking IS NOT NULL
-         AND NEW.rating_anchor_record_no IS NULL
-         AND (NEW.rank_rating IS NULL OR NEW.rating_is_estimated = TRUE) THEN
+      IF TG_OP = 'INSERT' THEN
+        v_snapshot_advanced := NEW.last_seen_at IS NOT NULL;
+      ELSIF TG_OP = 'UPDATE' THEN
+        v_snapshot_advanced :=
+          (
+            NEW.last_seen_at IS NOT NULL
+            AND (OLD.last_seen_at IS NULL OR NEW.last_seen_at > OLD.last_seen_at)
+          )
+          OR NEW.win_count IS DISTINCT FROM OLD.win_count
+          OR NEW.lose_count IS DISTINCT FROM OLD.lose_count
+          OR NEW.draw_count IS DISTINCT FROM OLD.draw_count;
+      END IF;
+
+      IF NEW.current_ranking IS NOT NULL AND NEW.rating_anchor_record_no IS NULL
+         AND (
+           NEW.rank_rating IS NULL
+           OR NEW.rating_is_estimated = TRUE
+           OR v_snapshot_advanced
+         ) THEN
         PERFORM fn_infer_unseeded_solare_player_rating(
           NEW.region,
           NEW.user_no,
           NEW.user_nickname
         );
+      END IF;
+
+      IF v_snapshot_advanced AND NEW.current_ranking IS NOT NULL AND NEW.user_no IS NOT NULL THEN
+        PERFORM fn_process_solare_player_wl_checkpoint(
+          NEW.region,
+          NEW.user_no
+        );
+      ELSIF TG_OP = 'UPDATE' AND NEW.user_no IS NOT NULL THEN
+        -- Keep the latest checkpoint rating synchronized after inactivity decay, manual anchor seeding,
+        -- or monotonic clamping when no post-checkpoint Ranked matches have arrived yet.
+        UPDATE solare_player_wl_checkpoints cp
+        SET
+          checkpoint_rating = sp.rank_rating,
+          checkpoint_rating_is_estimated = COALESCE(sp.rating_is_estimated, FALSE),
+          updated_at = timezone('utc', now())
+        FROM solare_players sp
+        WHERE cp.region = NEW.region
+          AND cp.user_no = NEW.user_no
+          AND cp.season = COALESCE(sp.season, 9)
+          AND sp.region = NEW.region
+          AND sp.user_no = NEW.user_no
+          AND (
+            cp.checkpoint_rating IS DISTINCT FROM sp.rank_rating
+            OR cp.checkpoint_rating_is_estimated IS DISTINCT FROM COALESCE(sp.rating_is_estimated, FALSE)
+          )
+          AND cp.checkpoint_record_no = (
+            SELECT MAX(cp2.checkpoint_record_no)
+            FROM solare_player_wl_checkpoints cp2
+            WHERE cp2.region = NEW.region
+              AND cp2.user_no = NEW.user_no
+              AND cp2.season = COALESCE(sp.season, 9)
+          )
+          AND cp.checkpoint_record_no >= GREATEST(
+            COALESCE(sp.rating_achieved_record_no, 0),
+            COALESCE(sp.rating_anchor_record_no, 0)
+          )
+          AND NOT EXISTS (
+            SELECT 1
+            FROM solare_match_players mp_after
+            LEFT JOIN solare_matches m_after
+              ON m_after.region = mp_after.region AND m_after.record_no = mp_after.record_no
+            LEFT JOIN solare_match_mode_proofs pr_after
+              ON pr_after.region = mp_after.region AND pr_after.record_no = mp_after.record_no
+            WHERE mp_after.region = NEW.region
+              AND mp_after.record_no > cp.checkpoint_record_no
+              AND COALESCE(pr_after.mode, '') <> 'practice'
+              AND (
+                mp_after.user_no = NEW.user_no
+                OR (mp_after.user_no IS NULL AND LOWER(mp_after.user_nickname) = LOWER(sp.user_nickname))
+              )
+              AND (
+                m_after.record_no IS NULL
+                OR COALESCE(m_after.season, 9) = COALESCE(sp.season, 9)
+              )
+          );
       END IF;
 
       RETURN NEW;
@@ -994,14 +2079,10 @@ exports.up = (pgm) => {
     DROP TRIGGER IF EXISTS trg_solare_player_infer_rating ON solare_players;
 
     CREATE TRIGGER trg_solare_player_infer_rating
-    AFTER INSERT OR UPDATE OF current_ranking, rank_rating, win_count, lose_count, draw_count
+    AFTER INSERT OR UPDATE OF current_ranking, rank_rating, rating_is_estimated, win_count, lose_count, draw_count, last_seen_at
     ON solare_players
     FOR EACH ROW
-    WHEN (
-      NEW.current_ranking IS NOT NULL
-      AND NEW.rating_anchor_record_no IS NULL
-      AND (NEW.rank_rating IS NULL OR NEW.rating_is_estimated = TRUE)
-    )
+    WHEN (NEW.current_ranking IS NOT NULL)
     EXECUTE FUNCTION fn_trg_solare_player_infer_rating();
   `);
 
@@ -1037,6 +2118,7 @@ exports.up = (pgm) => {
         season,
         current_ranking,
         rank_rating,
+        rating_is_estimated,
         rating_anchor_record_no,
         rating_achieved_record_no
       INTO v_player
@@ -1064,9 +2146,7 @@ exports.up = (pgm) => {
       WHERE m.region = NEW.region AND m.record_no = NEW.record_no
       LIMIT 1;
 
-      IF v_match_season IS NOT NULL
-         AND v_player.season IS NOT NULL
-         AND v_match_season <> v_player.season THEN
+      IF FOUND AND COALESCE(v_match_season, 9) <> COALESCE(v_player.season, 9) THEN
         RETURN NEW;
       END IF;
 
@@ -1082,13 +2162,21 @@ exports.up = (pgm) => {
       IF v_player.rating_anchor_record_no IS NULL THEN
         SELECT EXISTS (
           SELECT 1
-          FROM solare_player_rating_events
-          WHERE region = NEW.region
-            AND user_no = v_player.user_no
-            AND event_type = 'inferred_start'
+          FROM solare_player_rating_events e
+          WHERE e.region = NEW.region
+            AND e.user_no = v_player.user_no
+            AND e.event_type = 'inferred_start'
+            AND COALESCE(e.season, 9) = COALESCE(v_player.season, 9)
+            AND e.id > COALESCE((
+              SELECT MAX(ep.id)
+              FROM solare_player_rating_events ep
+              WHERE ep.region = NEW.region
+                AND ep.user_no = v_player.user_no
+                AND ep.event_type IN ('season_reset', 'seed_anchor', 'reconcile')
+            ), 0)
         ) INTO v_has_inferred_event;
 
-        IF v_has_inferred_event THEN
+        IF v_has_inferred_event OR COALESCE(v_player.rating_is_estimated, FALSE) THEN
           PERFORM fn_infer_unseeded_solare_player_rating(
             NEW.region,
             v_player.user_no,

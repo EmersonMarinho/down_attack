@@ -2392,6 +2392,14 @@ async function reconcileRegionRatings({
                 WHERE e.region = solare_players.region
                   AND e.user_no = solare_players.user_no
                   AND e.event_type = 'inferred_start'
+                  AND COALESCE(e.season, 9) = COALESCE(solare_players.season, 9)
+                  AND e.id > COALESCE((
+                    SELECT MAX(ep.id)
+                    FROM solare_player_rating_events ep
+                    WHERE ep.region = solare_players.region
+                      AND ep.user_no = solare_players.user_no
+                      AND ep.event_type IN ('season_reset', 'seed_anchor', 'reconcile')
+                  ), 0)
               )
             )
           ORDER BY
@@ -2553,7 +2561,16 @@ async function resetSeasonRatings({ region, fromSeason, toSeason } = {}) {
 
   const result = await database.query({
     text: `
-      WITH target_players AS (
+      WITH cleared_checkpoints AS (
+        DELETE FROM solare_player_wl_checkpoints
+        WHERE ($1::varchar IS NULL OR region = $1::varchar)
+          AND (
+            $2::smallint IS NULL
+            OR season = $2::smallint
+            OR season = $3::smallint
+          )
+      ),
+      target_players AS (
         SELECT
           region,
           user_no,
@@ -2631,6 +2648,202 @@ async function resetSeasonRatings({ region, fromSeason, toSeason } = {}) {
   };
 }
 
+function verifyCronBearerToken(
+  authorizationHeader,
+  configuredSecret = process.env.CRON_SECRET,
+) {
+  if (typeof configuredSecret !== "string" || configuredSecret.trim() === "") {
+    return false;
+  }
+  if (typeof authorizationHeader !== "string") {
+    return false;
+  }
+
+  const match = authorizationHeader.match(/^Bearer\s+(\S+)$/i);
+  if (!match) {
+    return false;
+  }
+
+  const providedHash = crypto
+    .createHash("sha256")
+    .update(match[1], "utf8")
+    .digest();
+  const expectedHash = crypto
+    .createHash("sha256")
+    .update(configuredSecret.trim(), "utf8")
+    .digest();
+
+  return crypto.timingSafeEqual(providedHash, expectedHash);
+}
+
+function parseOptionalBoolean(value, fieldName, defaultValue) {
+  if (isEmptyParam(value)) {
+    return defaultValue;
+  }
+  if (typeof value === "boolean") {
+    return value;
+  }
+  if (typeof value === "string") {
+    const normalized = value.trim().toLowerCase();
+    if (normalized === "true" || normalized === "1") {
+      return true;
+    }
+    if (normalized === "false" || normalized === "0") {
+      return false;
+    }
+  }
+  throw new ValidationError({
+    message: `"${fieldName}" must be a boolean.`,
+    action: `Provide true or false for "${fieldName}".`,
+  });
+}
+
+async function runAutomatedMaintenance({
+  region,
+  season,
+  anchors = [],
+  autoClamp = false,
+  applyDecay = true,
+  now,
+} = {}) {
+  const explicitRegion = isEmptyParam(region) ? null : validateRegion(region);
+  const explicitSeason = validateSeason(season);
+  const resolvedAutoClamp = parseOptionalBoolean(
+    autoClamp,
+    "auto_clamp",
+    false,
+  );
+  const resolvedApplyDecay = parseOptionalBoolean(
+    applyDecay,
+    "apply_decay",
+    true,
+  );
+
+  if (anchors !== undefined && anchors !== null && !Array.isArray(anchors)) {
+    throw new ValidationError({
+      message: '"anchors" must be an array.',
+      action: "Provide an array of player rating anchor objects.",
+    });
+  }
+
+  if (Array.isArray(anchors)) {
+    for (const a of anchors) {
+      if (!a || typeof a !== "object" || Array.isArray(a)) {
+        throw new ValidationError({
+          message: "Each anchor entry must be an object.",
+          action: "Provide valid anchor objects with user_no and rating.",
+        });
+      }
+      if (!isEmptyParam(a.region)) {
+        validateRegion(a.region);
+      } else if (!explicitRegion) {
+        throw new ValidationError({
+          message:
+            'Each anchor must specify "region" when top-level "region" is omitted.',
+          action:
+            'Include "region" on each anchor or specify top-level "region".',
+        });
+      }
+    }
+  }
+
+  let targetRegions;
+  if (explicitRegion) {
+    targetRegions = [explicitRegion];
+  } else {
+    const regionsResult = await database.query({
+      text: `
+        SELECT DISTINCT UPPER(TRIM(region)) AS region
+        FROM solare_players
+        WHERE ($1::smallint IS NULL OR season = $1::smallint OR ($1::smallint = 9 AND season IS NULL))
+        ORDER BY region ASC
+        ;`,
+      values: [explicitSeason],
+    });
+    targetRegions = regionsResult.rows
+      .map((r) => r.region)
+      .filter((r) => VALID_REGIONS.includes(r));
+  }
+
+  const regionResults = [];
+  let totalDecayed = 0;
+  let totalReconciled = 0;
+  let totalInferred = 0;
+  let totalProvenRanked = 0;
+  let totalProvenPractice = 0;
+  let totalDiscrepancies = 0;
+
+  for (const reg of targetRegions) {
+    let regSeason = explicitSeason;
+    if (regSeason === null) {
+      const seasonRes = await database.query({
+        text: `
+          SELECT COALESCE(MAX(season), 9)::int AS active_season
+          FROM solare_players
+          WHERE region = $1
+          ;`,
+        values: [reg],
+      });
+      regSeason = Number(seasonRes.rows[0]?.active_season || 9);
+    }
+
+    let decaySummary = { decayedCount: 0, players: [] };
+    if (resolvedApplyDecay) {
+      decaySummary = await applyInactivityDecay({
+        region: reg,
+        season: regSeason,
+        now,
+      });
+    }
+
+    const regionAnchors = Array.isArray(anchors)
+      ? anchors.filter((a) =>
+          !isEmptyParam(a.region)
+            ? validateRegion(a.region) === reg
+            : explicitRegion === reg,
+        )
+      : [];
+
+    const reconcileSummary = await reconcileRegionRatings({
+      region: reg,
+      season: regSeason,
+      anchors: regionAnchors,
+      autoClamp: resolvedAutoClamp,
+    });
+
+    totalDecayed += decaySummary.decayedCount;
+    totalReconciled += reconcileSummary.reconciledCount;
+    totalInferred += reconcileSummary.inferredCount;
+    totalProvenRanked += reconcileSummary.provenRanked;
+    totalProvenPractice += reconcileSummary.provenPractice;
+    totalDiscrepancies += reconcileSummary.discrepancies.length;
+
+    regionResults.push({
+      region: reg,
+      season: regSeason,
+      decayedCount: decaySummary.decayedCount,
+      decayedPlayers: decaySummary.players,
+      reconciledCount: reconcileSummary.reconciledCount,
+      inferredCount: reconcileSummary.inferredCount,
+      provenRanked: reconcileSummary.provenRanked,
+      provenPractice: reconcileSummary.provenPractice,
+      discrepancies: reconcileSummary.discrepancies,
+    });
+  }
+
+  return {
+    executed_at: new Date().toISOString(),
+    regions_processed: regionResults.length,
+    total_decayed: totalDecayed,
+    total_reconciled: totalReconciled,
+    total_inferred: totalInferred,
+    total_proven_ranked: totalProvenRanked,
+    total_proven_practice: totalProvenPractice,
+    total_discrepancies: totalDiscrepancies,
+    regions: regionResults,
+  };
+}
+
 const solare = {
   VALID_REGIONS,
   SOLARE_STARTING_RATINGS,
@@ -2642,6 +2855,8 @@ const solare = {
   proveRegionMatchModes,
   applyInactivityDecay,
   reconcileRegionRatings,
+  runAutomatedMaintenance,
+  verifyCronBearerToken,
   resetSeasonRatings,
   createOrResetSession,
   getOverlayData,

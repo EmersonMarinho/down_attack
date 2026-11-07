@@ -1204,5 +1204,493 @@ describe("Solare Continuous Elo Rating Engine", () => {
       expect(twTarget.rows[0].rank_rating).toBeNull();
       expect(twTarget.rows[0].rating_is_estimated).toBe(false);
     });
+
+    test("proves Practice Mode for anchored veterans with missing historical games via W/L/D checkpoints and self-heals on cached snapshot refreshes", async () => {
+      await orchestrator.createSolarePlayer({
+        region: "JP",
+        season: 10,
+        user_no: 62001,
+        user_nickname: "JpS10Top1",
+        current_ranking: 1,
+        win_count: 120,
+        lose_count: 40,
+        rank_rating: 2185,
+        rating_anchor_record_no: 995000,
+        rating_achieved_record_no: 995000,
+      });
+
+      // Anchored veteran missing 100 early-season wins in DB (0 matches crawled yet, official 100W/50L)
+      await orchestrator.createSolarePlayer({
+        region: "JP",
+        season: 10,
+        user_no: 62002,
+        user_nickname: "JpS10Vet",
+        current_ranking: 2,
+        win_count: 100,
+        lose_count: 50,
+        rank_rating: 2150,
+        rating_anchor_record_no: 995000,
+        rating_achieved_record_no: 995000,
+      });
+
+      await orchestrator.createSolarePlayer({
+        region: "JP",
+        season: 10,
+        user_no: 62003,
+        user_nickname: "JpS10Top3",
+        current_ranking: 3,
+        win_count: 110,
+        lose_count: 45,
+        rank_rating: 2170,
+        rating_anchor_record_no: 995000,
+        rating_achieved_record_no: 995000,
+      });
+
+      // Another veteran in the same Practice lobby, also missing 80 early-season games in DB
+      await orchestrator.createSolarePlayer({
+        region: "JP",
+        season: 10,
+        user_no: 62050,
+        user_nickname: "JpS10OtherVet",
+        current_ranking: 50,
+        win_count: 80,
+        lose_count: 40,
+        rank_rating: 1950,
+        rating_anchor_record_no: 995000,
+        rating_achieved_record_no: 995000,
+      });
+
+      // 1. Practice Mode match 995001 (+18 for JpS10Vet, no .repz)
+      await orchestrator.createSolareMatch({
+        region: "JP",
+        season: 10,
+        record_no: 995001,
+        repz_download_url: null,
+        players: [
+          {
+            team: 0,
+            user_nickname: "JpS10Vet",
+            user_no: 62002,
+            class_type: 20,
+            skill_branch_type: 2,
+            is_winner: true,
+            vary_rank_rating: 18,
+          },
+          {
+            team: 0,
+            user_nickname: "JpS10OtherVet",
+            user_no: 62050,
+            class_type: 12,
+            skill_branch_type: 1,
+            is_winner: true,
+            vary_rank_rating: 19,
+          },
+          {
+            team: 0,
+            user_nickname: "JpS10Ally",
+            user_no: 62901,
+            class_type: 4,
+            skill_branch_type: 1,
+            is_winner: true,
+            vary_rank_rating: 20,
+          },
+          {
+            team: 1,
+            user_nickname: "JpS10En1",
+            user_no: 62902,
+            class_type: 8,
+            skill_branch_type: 1,
+            is_winner: false,
+            vary_rank_rating: -19,
+          },
+          {
+            team: 1,
+            user_nickname: "JpS10En2",
+            user_no: 62903,
+            class_type: 16,
+            skill_branch_type: 1,
+            is_winner: false,
+            vary_rank_rating: -19,
+          },
+          {
+            team: 1,
+            user_nickname: "JpS10En3",
+            user_no: 62904,
+            class_type: 25,
+            skill_branch_type: 1,
+            is_winner: false,
+            vary_rank_rating: -19,
+          },
+        ],
+      });
+
+      // Before next GetRankList crawl, JpS10Vet temporarily moved 2150 -> 2168
+      let vetRow = await database.query({
+        text: "SELECT rank_rating FROM solare_players WHERE region = 'JP' AND user_no = 62002;",
+      });
+      expect(vetRow.rows[0].rank_rating).toBe(2168);
+
+      // Next GetRankList crawl arrives with official W/L unchanged (100W / 50L -> ΔW = 0)
+      await database.query({
+        text: `
+          UPDATE solare_players
+          SET win_count = 100, lose_count = 50, draw_count = 0, last_seen_at = NOW(), updated_at = NOW()
+          WHERE region = 'JP' AND user_no = 62002;
+        `,
+      });
+
+      let cpProof = await database.query({
+        text: "SELECT mode, method FROM solare_match_mode_proofs WHERE region = 'JP' AND record_no = 995001;",
+      });
+      expect(cpProof.rows[0]).toEqual({
+        mode: "practice",
+        method: "checkpoint_wl_delta",
+      });
+
+      // Both veterans' Practice deltas on 995001 were automatically rolled back!
+      vetRow = await database.query({
+        text: "SELECT rank_rating, rating_achieved_record_no::int AS achieved FROM solare_players WHERE region = 'JP' AND user_no = 62002;",
+      });
+      expect(vetRow.rows[0]).toEqual({ rank_rating: 2150, achieved: 995000 });
+
+      const otherVetRow = await database.query({
+        text: "SELECT rank_rating FROM solare_players WHERE region = 'JP' AND user_no = 62050;",
+      });
+      expect(otherVetRow.rows[0].rank_rating).toBe(1950);
+
+      // Region-wide reconciliation preserves the checkpoint proof without deleting it
+      const regionCheck = await solare.proveRegionMatchModes({
+        region: "JP",
+        season: 10,
+      });
+      expect(regionCheck.deletedCount).toBe(0);
+      expect(regionCheck.provenPractice).toBeGreaterThanOrEqual(1);
+
+      // 2. Real-time self-healing if GetRankList had been cached and refreshes to W=101 on the same watermark
+      await database.query({
+        text: `
+          UPDATE solare_players
+          SET win_count = 101, last_seen_at = NOW(), updated_at = NOW()
+          WHERE region = 'JP' AND user_no = 62002;
+        `,
+      });
+
+      cpProof = await database.query({
+        text: "SELECT * FROM solare_match_mode_proofs WHERE region = 'JP' AND record_no = 995001;",
+      });
+      expect(cpProof.rowCount).toBe(0);
+
+      vetRow = await database.query({
+        text: "SELECT rank_rating, rating_achieved_record_no::int AS achieved FROM solare_players WHERE region = 'JP' AND user_no = 62002;",
+      });
+      expect(vetRow.rows[0]).toEqual({ rank_rating: 2168, achieved: 995001 });
+
+      // 3. Mixed Practice (+18) + Ranked (+12) window:
+      // First simulate a cached GetRankList snapshot at W=101 (dW=0 -> both 995002 and 995003 marked practice),
+      // then simulate partial refresh to W=102 (dW=1 -> self-heals over-exclusion and solves 995002=practice & 995003=ranked!)
+      await orchestrator.createSolareMatch({
+        region: "JP",
+        season: 10,
+        record_no: 995002,
+        repz_download_url: null,
+        user_nickname: "JpS10Vet",
+        user_no: 62002,
+        is_winner: true,
+        vary_rank_rating: 18,
+      });
+      await orchestrator.createSolareMatch({
+        region: "JP",
+        season: 10,
+        record_no: 995003,
+        repz_download_url: null,
+        user_nickname: "JpS10Vet",
+        user_no: 62002,
+        is_winner: true,
+        vary_rank_rating: 12,
+      });
+
+      await database.query({
+        text: `
+          UPDATE solare_players
+          SET win_count = 101, last_seen_at = NOW(), updated_at = NOW()
+          WHERE region = 'JP' AND user_no = 62002;
+        `,
+      });
+
+      let cachedMixedProofs = await database.query({
+        text: "SELECT record_no::int AS record_no, mode, method FROM solare_match_mode_proofs WHERE region = 'JP' AND record_no IN (995002, 995003) ORDER BY record_no ASC;",
+      });
+      expect(cachedMixedProofs.rows).toEqual([
+        { record_no: 995002, mode: "practice", method: "checkpoint_wl_delta" },
+        { record_no: 995003, mode: "practice", method: "checkpoint_wl_delta" },
+      ]);
+
+      await database.query({
+        text: `
+          UPDATE solare_players
+          SET win_count = 102, last_seen_at = NOW(), updated_at = NOW()
+          WHERE region = 'JP' AND user_no = 62002;
+        `,
+      });
+
+      const mixedProofs = await database.query({
+        text: "SELECT record_no::int AS record_no, mode, method FROM solare_match_mode_proofs WHERE region = 'JP' AND record_no IN (995002, 995003) ORDER BY record_no ASC;",
+      });
+      expect(mixedProofs.rows).toEqual([
+        { record_no: 995002, mode: "practice", method: "checkpoint_math" },
+        { record_no: 995003, mode: "ranked", method: "checkpoint_math" },
+      ]);
+
+      vetRow = await database.query({
+        text: "SELECT rank_rating, rating_achieved_record_no::int AS achieved FROM solare_players WHERE region = 'JP' AND user_no = 62002;",
+      });
+      expect(vetRow.rows[0]).toEqual({ rank_rating: 2180, achieved: 995003 });
+
+      // 4. Inactivity decay syncs latest checkpoint_rating when no post-checkpoint Ranked matches exist
+      const futureNow = new Date(Date.now() + 2.5 * 24 * 60 * 60 * 1000);
+      await solare.applyInactivityDecay({
+        region: "JP",
+        season: 10,
+        now: futureNow,
+      });
+
+      const decayedCp = await database.query({
+        text: `
+          SELECT checkpoint_rating
+          FROM solare_player_wl_checkpoints
+          WHERE region = 'JP' AND user_no = 62002 AND season = 10 AND checkpoint_record_no = 995003;
+        `,
+      });
+      expect(decayedCp.rows[0].checkpoint_rating).toBe(2140);
+    });
+
+    test("preserves post-resetSeasonRatings progression for players with prior-season inferred_start events", async () => {
+      await orchestrator.createSolarePlayer({
+        region: "TW",
+        season: 9,
+        user_no: 75001,
+        user_nickname: "TwS9Top",
+        current_ranking: 1,
+        win_count: 30,
+        lose_count: 5,
+        rank_rating: 2200,
+        rating_anchor_record_no: 997000,
+        rating_achieved_record_no: 997000,
+        last_seen_at: new Date().toISOString(),
+      });
+      await orchestrator.createSolarePlayer({
+        region: "TW",
+        season: 9,
+        user_no: 75003,
+        user_nickname: "TwS9Bot",
+        current_ranking: 3,
+        win_count: 25,
+        lose_count: 8,
+        rank_rating: 2120,
+        rating_anchor_record_no: 997000,
+        rating_achieved_record_no: 997000,
+        last_seen_at: new Date().toISOString(),
+      });
+      await orchestrator.createSolarePlayer({
+        region: "TW",
+        season: 9,
+        user_no: 75002,
+        user_nickname: "TwS9Inferred",
+        current_ranking: 2,
+        win_count: 1,
+        lose_count: 0,
+        rank_rating: null,
+        last_seen_at: new Date().toISOString(),
+      });
+
+      // Legacy Season 9 match (with season = NULL) infers TwS9Inferred at 801 + 1350? Use +25 between 830 and 820:
+      await database.query({
+        text: `
+          UPDATE solare_players SET rank_rating = 830 WHERE region = 'TW' AND user_no = 75001;
+          UPDATE solare_players SET rank_rating = 820 WHERE region = 'TW' AND user_no = 75003;
+        `,
+      });
+      await orchestrator.createSolareMatch({
+        region: "TW",
+        season: null,
+        record_no: 997001,
+        user_nickname: "TwS9Inferred",
+        user_no: 75002,
+        is_winner: true,
+        vary_rank_rating: 25,
+      });
+
+      let pRow = await database.query({
+        text: "SELECT rank_rating FROM solare_players WHERE region = 'TW' AND user_no = 75002;",
+      });
+      expect(pRow.rows[0].rank_rating).toBe(826);
+
+      // Reset TW from Season 9 -> Season 10 (826 resets to 401, with historical Season 9 inferred_start preserved)
+      await solare.resetSeasonRatings({
+        region: "TW",
+        fromSeason: 9,
+        toSeason: 10,
+      });
+
+      // First Season 10 Ranked match (+28) must apply match_delta (401 + 28 = 429) without Season 9 interference
+      await orchestrator.createSolareMatch({
+        region: "TW",
+        season: 10,
+        record_no: 997010,
+        user_nickname: "TwS9Inferred",
+        user_no: 75002,
+        is_winner: true,
+        vary_rank_rating: 28,
+      });
+
+      pRow = await database.query({
+        text: "SELECT season, rank_rating, rating_achieved_record_no::int AS achieved FROM solare_players WHERE region = 'TW' AND user_no = 75002;",
+      });
+      expect(pRow.rows[0]).toEqual({
+        season: 10,
+        rank_rating: 429,
+        achieved: 997010,
+      });
+
+      // Reconciling Season 10 must also preserve 429
+      await solare.reconcileRegionRatings({ region: "TW", season: 10 });
+      pRow = await database.query({
+        text: "SELECT rank_rating FROM solare_players WHERE region = 'TW' AND user_no = 75002;",
+      });
+      expect(pRow.rows[0].rank_rating).toBe(429);
+    });
+
+    test("GET & POST /api/v1/solare/reconcile enforce auth and automate inactivity decay + rating reconciliation", async () => {
+      const fourDaysAgo = new Date(
+        Date.now() - 4 * 24 * 60 * 60 * 1000,
+      ).toISOString();
+      const nowIso = new Date().toISOString();
+
+      await orchestrator.createSolarePlayer({
+        region: "NA",
+        season: 10,
+        user_no: 85001,
+        user_nickname: "NaS10Decay1",
+        current_ranking: 1,
+        win_count: 60,
+        lose_count: 20,
+        rank_rating: 2450,
+        rating_anchor_record_no: 996000,
+        rating_achieved_record_no: 996000,
+        rating_achieved_at: fourDaysAgo,
+      });
+
+      await orchestrator.createSolarePlayer({
+        region: "NA",
+        season: 10,
+        user_no: 85002,
+        user_nickname: "NaS10Rank2",
+        current_ranking: 2,
+        win_count: 55,
+        lose_count: 22,
+        rank_rating: 2350,
+        rating_anchor_record_no: 996000,
+        rating_achieved_record_no: 996000,
+        rating_achieved_at: nowIso,
+      });
+
+      // 1. Anonymous request -> 403
+      const anonRes = await fetch(
+        `${webserver.origin}/api/v1/solare/reconcile?region=NA&season=10`,
+      );
+      expect(anonRes.status).toBe(403);
+
+      // 2. Wrong Bearer token -> 403
+      const badTokenRes = await fetch(
+        `${webserver.origin}/api/v1/solare/reconcile`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: "Bearer invalid-cron-token",
+          },
+          body: JSON.stringify({ region: "NA", season: 10 }),
+        },
+      );
+      expect(badTokenRes.status).toBe(403);
+
+      // 3. Default logged-in user without "run:migrations" -> 403
+      const defaultUser = await orchestrator.createUser();
+      const defaultSession = await orchestrator.createSession(defaultUser);
+      const defaultUserRes = await fetch(
+        `${webserver.origin}/api/v1/solare/reconcile?region=NA&season=10`,
+        {
+          headers: { Cookie: `session_id=${defaultSession.token}` },
+        },
+      );
+      expect(defaultUserRes.status).toBe(403);
+
+      // 4. Admin user with "run:migrations": GET runs decay (2450 -> 2300) + reconciliation audit
+      const adminUser = await orchestrator.createUser();
+      await orchestrator.addFeaturesToUser(adminUser, ["run:migrations"]);
+      const adminSession = await orchestrator.createSession(adminUser);
+
+      const getRes = await fetch(
+        `${webserver.origin}/api/v1/solare/reconcile?region=NA&season=10`,
+        {
+          headers: { Cookie: `session_id=${adminSession.token}` },
+        },
+      );
+      expect(getRes.status).toBe(200);
+      expect(getRes.headers.get("cache-control")).toBe("no-store");
+
+      const getBody = await getRes.json();
+      expect(getBody.regions_processed).toBe(1);
+      expect(getBody.total_decayed).toBe(1);
+      expect(getBody.total_discrepancies).toBe(1);
+      expect(getBody.regions[0].decayedPlayers[0]).toMatchObject({
+        user_nickname: "NaS10Decay1",
+        rating_before: 2450,
+        rating_after: 2300,
+      });
+
+      // 5. POST with auto_clamp: true resolves the post-decay monotonicity inversion (Rank #2 2350 -> 2300)
+      const postRes = await fetch(
+        `${webserver.origin}/api/v1/solare/reconcile`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Cookie: `session_id=${adminSession.token}`,
+          },
+          body: JSON.stringify({
+            region: "NA",
+            season: 10,
+            auto_clamp: true,
+          }),
+        },
+      );
+      expect(postRes.status).toBe(200);
+      const postBody = await postRes.json();
+      expect(postBody.total_discrepancies).toBe(0);
+      expect(postBody.total_reconciled).toBe(1);
+
+      const naPlayers = await database.query({
+        text: "SELECT user_nickname, rank_rating FROM solare_players WHERE region = 'NA' AND season = 10 ORDER BY current_ranking ASC;",
+      });
+      expect(naPlayers.rows).toEqual([
+        { user_nickname: "NaS10Decay1", rank_rating: 2300 },
+        { user_nickname: "NaS10Rank2", rank_rating: 2300 },
+      ]);
+
+      // 6. Malformed JSON body -> 400 ValidationError (never silently defaults to all-region run)
+      const malformedRes = await fetch(
+        `${webserver.origin}/api/v1/solare/reconcile`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Cookie: `session_id=${adminSession.token}`,
+          },
+          body: "{malformed-json",
+        },
+      );
+      expect(malformedRes.status).toBe(400);
+    });
   });
 });

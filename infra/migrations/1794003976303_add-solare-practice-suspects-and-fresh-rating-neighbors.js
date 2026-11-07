@@ -1,22 +1,20 @@
 /**
- * Partidas suspeitas de Modo Treino (não destrutivo) + vizinhos atualizados na inferência de rating.
+ * Non-destructive Practice Mode suspect flags + fresh rating neighbors in rating inference.
  *
- * Por que marcar em vez de apagar:
- * - Na abertura da Ranked (17h/13h) partidas de Treino e de Ranked se intercalam no `record_no`,
- *   e nem o `record_no` nem o horário de coleta separam os dois modos com 100% de certeza.
- * - Apagar por janela de horário poderia remover partidas Ranked legítimas.
+ * Why flag instead of delete:
+ * - When the Ranked queue opens, Practice Mode and Ranked matches can interleave in `record_no`,
+ *   and neither `record_no` nor crawl timestamp separates the two modes with 100% certainty.
+ * - Deleting by time window could remove legitimate Ranked matches.
  *
- * Como as suspeitas são usadas:
- * - `fn_infer_unseeded_solare_player_rating` só ignora as suspeitas de um jogador quando isso
- *   aproxima o W/L/D do banco do W/L/D oficial (`solare_players`) SEM deixar excesso e com no
- *   máximo 2 jogos de diferença. Caso contrário, todas as partidas continuam contando.
- * - Nenhuma linha de `solare_matches` / `solare_match_players` é removida.
+ * How suspect flags are used:
+ * - `fn_infer_unseeded_solare_player_rating` only ignores a player's suspect matches when doing so
+ *   brings the DB W/L/D strictly closer to the official W/L/D (`solare_players`) WITHOUT leaving any
+ *   excess and within at most 2 games of difference. Otherwise, all matches remain counted.
+ * - Zero rows are deleted from `solare_matches` or `solare_match_players`.
  *
- * Vizinhos atualizados:
- * - Quando duas linhas de `solare_players` têm o mesmo `current_ranking` (uma delas antiga, de quem
- *   saiu do ranking), vale apenas a vista mais recentemente (`last_seen_at`). Antes, a linha antiga
- *   podia virar limite superior/inferior e bloquear a inferência (ex.: `McB` #373 de 31/10 no lugar
- *   de `Kurumin` #373 de 06/11, travando `TheLaskot` #374).
+ * Fresh rating neighbors:
+ * - When two rows in `solare_players` share the same `current_ranking` (one stale from a player who
+ *   dropped out of the leaderboard), only the most recently seen row (`last_seen_at`) is used.
  */
 exports.up = (pgm) => {
   pgm.sql(`
@@ -73,7 +71,7 @@ exports.up = (pgm) => {
         FROM room_stats
         WHERE has_repz
       ),
-      -- Partidas sem .repz entre duas sessões Ranked (fechamento noturno >= 6h entre as .repz vizinhas)
+      -- Matches without .repz between two Ranked sessions (overnight queue closure >= 6h between adjacent .repz matches)
       overnight_gap AS (
         SELECT rs.record_no, 'overnight_gap'::varchar(32) AS reason
         FROM room_stats rs
@@ -83,7 +81,7 @@ exports.up = (pgm) => {
         WHERE NOT rs.has_repz
           AND ri.next_date - ri.prev_date >= INTERVAL '6 hours'
       ),
-      -- Sala inteira com PDL baixo (>= 3 jogadores resolvidos e todos com |PDL| <= 15)
+      -- Full low-PDL lobby (>= 3 resolved players and all with |PDL| <= 15)
       low_pdl_room AS (
         SELECT record_no, 'low_pdl_room'::varchar(32) AS reason
         FROM room_stats
@@ -92,7 +90,7 @@ exports.up = (pgm) => {
           AND valid_pdl_count >= 3
           AND max_abs_pdl <= 15
       ),
-      -- Trio pré-formado (a Ranked é Solo Queue): mesmo trio no mesmo time em 2+ partidas sem .repz próximas
+      -- Premade trio (Ranked is strictly Solo Queue): identical 3-player team in 2+ nearby non-.repz matches
       team_keys AS (
         SELECT
           mp.record_no,
@@ -242,8 +240,8 @@ exports.up = (pgm) => {
       INTO v_stats
       FROM player_matches;
 
-      -- Só ignora as suspeitas quando isso comprovadamente aproxima o W/L/D do oficial,
-      -- sem deixar nenhum excesso e com no máximo 2 jogos de diferença.
+      -- Only ignore suspect matches when doing so brings DB W/L/D strictly closer to official counts,
+      -- leaving zero excess and at most 2 games of difference.
       IF v_stats.suspect_count > 0 THEN
         v_dist_full :=
           ABS(v_stats.full_w - COALESCE(v_player.win_count, 0))
@@ -299,7 +297,7 @@ exports.up = (pgm) => {
         RETURN FALSE;
       END IF;
 
-      -- Para cada posição do ranking vale só a linha vista mais recentemente (ignora duplicatas antigas)
+      -- Deduplicate each ranking slot by the most recently seen player row (ignore stale duplicates)
       SELECT x.rank_rating
       INTO v_upper_bound
       FROM (
