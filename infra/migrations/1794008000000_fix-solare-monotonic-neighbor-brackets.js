@@ -24,6 +24,415 @@
  *      and runs multi-pass rating inference across all regions.
  */
 exports.up = (pgm) => {
+  // Ensure objects added in the second revision of 1794007000000 exist in environments
+  // (such as Staging) that applied the initial revision of 1794007000000 before
+  // solare_player_wl_checkpoints was introduced.
+  pgm.sql(`
+    CREATE INDEX IF NOT EXISTS solare_match_mode_proofs_region_mode_record_no_idx
+    ON solare_match_mode_proofs (region, mode, record_no);
+
+    CREATE TABLE IF NOT EXISTS solare_player_wl_checkpoints (
+      region varchar(8) NOT NULL,
+      user_no bigint NOT NULL,
+      season smallint NOT NULL DEFAULT 9,
+      checkpoint_record_no bigint NOT NULL DEFAULT 0,
+      checkpoint_at timestamptz NOT NULL,
+      win_count integer NOT NULL DEFAULT 0,
+      lose_count integer NOT NULL DEFAULT 0,
+      draw_count integer NOT NULL DEFAULT 0,
+      checkpoint_rating integer,
+      checkpoint_rating_is_estimated boolean NOT NULL DEFAULT FALSE,
+      updated_at timestamptz NOT NULL DEFAULT timezone('utc', now()),
+      PRIMARY KEY (region, user_no, season, checkpoint_record_no)
+    );
+
+    CREATE OR REPLACE FUNCTION fn_is_solare_practice_contradicted(
+      p_region VARCHAR,
+      p_record_no BIGINT,
+      p_self_user_no BIGINT,
+      p_self_nickname VARCHAR,
+      p_season INTEGER
+    )
+    RETURNS BOOLEAN AS $$
+    DECLARE
+      v_target_season SMALLINT := COALESCE(p_season, 9)::smallint;
+      v_part RECORD;
+      v_cp_prev RECORD;
+      v_cp_curr RECORD;
+      v_has_late_pre BOOLEAN;
+      v_int_w INTEGER;
+      v_int_l INTEGER;
+      v_int_d INTEGER;
+      v_dw INTEGER;
+      v_dl INTEGER;
+      v_dd INTEGER;
+      v_tot_w INTEGER;
+      v_tot_l INTEGER;
+      v_tot_d INTEGER;
+    BEGIN
+      FOR v_part IN
+        SELECT
+          sp2.user_no,
+          sp2.user_nickname,
+          sp2.season,
+          sp2.win_count,
+          sp2.lose_count,
+          sp2.draw_count,
+          sp2.last_seen_at,
+          CASE
+            WHEN mp2.is_winner THEN 'w'
+            WHEN EXISTS (
+              SELECT 1
+              FROM solare_match_players w2
+              WHERE w2.region = mp2.region
+                AND w2.record_no = mp2.record_no
+                AND w2.is_winner
+            ) THEN 'l'
+            ELSE 'd'
+          END AS outcome
+        FROM solare_match_players mp2
+        INNER JOIN solare_players sp2
+          ON sp2.region = mp2.region
+         AND (
+           (mp2.user_no IS NOT NULL AND sp2.user_no = mp2.user_no)
+           OR (mp2.user_no IS NULL AND LOWER(sp2.user_nickname) = LOWER(mp2.user_nickname))
+         )
+        WHERE mp2.region = p_region
+          AND mp2.record_no = p_record_no
+          AND NOT (
+            (p_self_user_no IS NOT NULL AND sp2.user_no = p_self_user_no)
+            OR (p_self_user_no IS NULL AND LOWER(sp2.user_nickname) = LOWER(COALESCE(p_self_nickname, '')))
+          )
+          AND sp2.current_ranking IS NOT NULL
+          AND sp2.current_ranking >= 1
+          AND (
+            sp2.season = v_target_season
+            OR (v_target_season = 9 AND sp2.season IS NULL)
+          )
+          AND NOT EXISTS (
+            SELECT 1
+            FROM solare_players sp_newer
+            WHERE sp_newer.region = sp2.region
+              AND sp_newer.current_ranking = sp2.current_ranking
+              AND NOT (
+                (sp2.user_no IS NOT NULL AND sp_newer.user_no = sp2.user_no)
+                OR (sp2.user_no IS NULL AND sp_newer.user_no IS NULL AND LOWER(sp_newer.user_nickname) = LOWER(sp2.user_nickname))
+              )
+              AND (
+                sp_newer.season = v_target_season
+                OR (v_target_season = 9 AND sp_newer.season IS NULL)
+              )
+              AND COALESCE(sp_newer.last_seen_at, sp_newer.updated_at) > COALESCE(sp2.last_seen_at, sp2.updated_at)
+          )
+          AND (
+            sp2.last_seen_at IS NULL
+            OR NOT EXISTS (
+              SELECT 1
+              FROM solare_match_players mp_post
+              INNER JOIN solare_matches m_post
+                ON m_post.region = mp_post.region AND m_post.record_no = mp_post.record_no
+              LEFT JOIN solare_match_mode_proofs pr_post
+                ON pr_post.region = mp_post.region AND pr_post.record_no = mp_post.record_no
+              WHERE mp_post.region = sp2.region
+                AND COALESCE(pr_post.mode, '') <> 'practice'
+                AND (
+                  (sp2.user_no IS NOT NULL AND mp_post.user_no = sp2.user_no)
+                  OR ((sp2.user_no IS NULL OR mp_post.user_no IS NULL) AND LOWER(mp_post.user_nickname) = LOWER(sp2.user_nickname))
+                )
+                AND COALESCE(m_post.season, 9) = COALESCE(sp2.season, v_target_season)
+                AND m_post.match_date IS NOT NULL
+                AND m_post.match_date > sp2.last_seen_at + INTERVAL '10 seconds'
+            )
+          )
+      LOOP
+        IF v_part.user_no IS NOT NULL THEN
+          SELECT *
+          INTO v_cp_prev
+          FROM solare_player_wl_checkpoints
+          WHERE region = p_region
+            AND user_no = v_part.user_no
+            AND season = COALESCE(v_part.season, v_target_season)
+            AND checkpoint_record_no < p_record_no
+          ORDER BY checkpoint_record_no DESC
+          LIMIT 1;
+
+          IF FOUND THEN
+            SELECT *
+            INTO v_cp_curr
+            FROM solare_player_wl_checkpoints
+            WHERE region = p_region
+              AND user_no = v_part.user_no
+              AND season = COALESCE(v_part.season, v_target_season)
+              AND checkpoint_record_no >= p_record_no
+            ORDER BY checkpoint_record_no ASC
+            LIMIT 1;
+
+            IF FOUND THEN
+              SELECT EXISTS (
+                SELECT 1
+                FROM solare_match_players mp_l
+                INNER JOIN solare_matches m_l
+                  ON m_l.region = mp_l.region AND m_l.record_no = mp_l.record_no
+                WHERE mp_l.region = p_region
+                  AND mp_l.user_no = v_part.user_no
+                  AND mp_l.record_no > v_cp_prev.checkpoint_record_no
+                  AND mp_l.record_no <= v_cp_curr.checkpoint_record_no
+                  AND m_l.match_date IS NOT NULL
+                  AND m_l.match_date < v_cp_prev.checkpoint_at - INTERVAL '2 seconds'
+              ) INTO v_has_late_pre;
+
+              IF NOT v_has_late_pre THEN
+                v_dw := v_cp_curr.win_count - v_cp_prev.win_count;
+                v_dl := v_cp_curr.lose_count - v_cp_prev.lose_count;
+                v_dd := v_cp_curr.draw_count - v_cp_prev.draw_count;
+
+                SELECT
+                  COUNT(*) FILTER (WHERE out_c = 'w')::int,
+                  COUNT(*) FILTER (WHERE out_c = 'l')::int,
+                  COUNT(*) FILTER (WHERE out_c = 'd')::int
+                INTO v_int_w, v_int_l, v_int_d
+                FROM (
+                  SELECT
+                    CASE
+                      WHEN mp_i.is_winner THEN 'w'
+                      WHEN EXISTS (
+                        SELECT 1
+                        FROM solare_match_players w_i
+                        WHERE w_i.region = mp_i.region
+                          AND w_i.record_no = mp_i.record_no
+                          AND w_i.is_winner
+                      ) THEN 'l'
+                      ELSE 'd'
+                    END AS out_c
+                  FROM solare_match_players mp_i
+                  LEFT JOIN solare_matches m_i
+                    ON m_i.region = mp_i.region AND m_i.record_no = mp_i.record_no
+                  LEFT JOIN solare_match_mode_proofs pr_i
+                    ON pr_i.region = mp_i.region AND pr_i.record_no = mp_i.record_no
+                  WHERE mp_i.region = p_region
+                    AND mp_i.user_no = v_part.user_no
+                    AND mp_i.record_no > v_cp_prev.checkpoint_record_no
+                    AND mp_i.record_no <= v_cp_curr.checkpoint_record_no
+                    AND COALESCE(pr_i.mode, '') <> 'practice'
+                    AND (
+                      m_i.record_no IS NULL
+                      OR COALESCE(m_i.season, 9) = COALESCE(v_part.season, v_target_season)
+                    )
+                ) sub_i;
+
+                IF v_int_w >= v_dw AND v_int_l >= v_dl AND v_int_d >= v_dd THEN
+                  IF (v_part.outcome = 'w' AND v_int_w <= v_dw)
+                     OR (v_part.outcome = 'l' AND v_int_l <= v_dl)
+                     OR (v_part.outcome = 'd' AND v_int_d <= v_dd) THEN
+                    RETURN TRUE;
+                  END IF;
+                END IF;
+              END IF;
+            END IF;
+          END IF;
+        END IF;
+
+        SELECT
+          COUNT(*) FILTER (WHERE out_s = 'w')::int,
+          COUNT(*) FILTER (WHERE out_s = 'l')::int,
+          COUNT(*) FILTER (WHERE out_s = 'd')::int
+        INTO v_tot_w, v_tot_l, v_tot_d
+        FROM (
+          SELECT
+            CASE
+              WHEN mp_cnt.is_winner THEN 'w'
+              WHEN EXISTS (
+                SELECT 1
+                FROM solare_match_players w_cnt
+                WHERE w_cnt.region = mp_cnt.region
+                  AND w_cnt.record_no = mp_cnt.record_no
+                  AND w_cnt.is_winner
+              ) THEN 'l'
+              ELSE 'd'
+            END AS out_s
+          FROM solare_match_players mp_cnt
+          LEFT JOIN solare_matches m_cnt
+            ON m_cnt.region = mp_cnt.region AND m_cnt.record_no = mp_cnt.record_no
+          LEFT JOIN solare_match_mode_proofs pr_cnt
+            ON pr_cnt.region = mp_cnt.region AND pr_cnt.record_no = mp_cnt.record_no
+          WHERE mp_cnt.region = p_region
+            AND (
+              (v_part.user_no IS NOT NULL AND mp_cnt.user_no = v_part.user_no)
+              OR ((v_part.user_no IS NULL OR mp_cnt.user_no IS NULL) AND LOWER(mp_cnt.user_nickname) = LOWER(v_part.user_nickname))
+            )
+            AND COALESCE(pr_cnt.mode, '') <> 'practice'
+            AND (
+              m_cnt.record_no IS NULL
+              OR COALESCE(m_cnt.season, 9) = COALESCE(v_part.season, v_target_season)
+            )
+        ) sub_s;
+
+        IF v_tot_w >= COALESCE(v_part.win_count, 0)
+           AND v_tot_l >= COALESCE(v_part.lose_count, 0)
+           AND v_tot_d >= COALESCE(v_part.draw_count, 0) THEN
+          IF (v_part.outcome = 'w' AND v_tot_w <= COALESCE(v_part.win_count, 0))
+             OR (v_part.outcome = 'l' AND v_tot_l <= COALESCE(v_part.lose_count, 0))
+             OR (v_part.outcome = 'd' AND v_tot_d <= COALESCE(v_part.draw_count, 0)) THEN
+            RETURN TRUE;
+          END IF;
+        END IF;
+      END LOOP;
+
+      RETURN FALSE;
+    END;
+    $$ LANGUAGE plpgsql;
+
+    CREATE OR REPLACE FUNCTION fn_trg_solare_match_mode_proof_sync()
+    RETURNS TRIGGER AS $$
+    DECLARE
+      v_ev RECORD;
+      v_applied_delta INTEGER;
+      v_epoch_id BIGINT;
+      v_prev_record_no BIGINT;
+      v_prev_at TIMESTAMPTZ;
+      v_player_anchor BIGINT;
+      v_player_season SMALLINT;
+      v_player_last_seen TIMESTAMPTZ;
+    BEGIN
+      IF (TG_OP = 'INSERT' AND NEW.mode = 'practice')
+         OR (TG_OP = 'UPDATE' AND NEW.mode = 'practice' AND OLD.mode IS DISTINCT FROM 'practice') THEN
+        INSERT INTO solare_practice_suspect_matches (region, record_no, reason)
+        VALUES (NEW.region, NEW.record_no, 'math_proof')
+        ON CONFLICT (region, record_no) DO NOTHING;
+
+        FOR v_ev IN
+          DELETE FROM solare_player_rating_events
+          WHERE region = NEW.region
+            AND record_no = NEW.record_no
+            AND event_type = 'match_delta'
+          RETURNING id, season, user_no, previous_rating, new_rating, rating_delta
+        LOOP
+          v_applied_delta := COALESCE(
+            v_ev.new_rating - v_ev.previous_rating,
+            v_ev.rating_delta
+          );
+
+          SELECT MAX(e_ep.id)
+          INTO v_epoch_id
+          FROM solare_player_rating_events e_ep
+          WHERE e_ep.region = NEW.region
+            AND e_ep.user_no = v_ev.user_no
+            AND e_ep.event_type IN ('seed_anchor', 'reconcile', 'season_reset');
+
+          IF v_epoch_id IS NOT NULL AND v_epoch_id > v_ev.id THEN
+            CONTINUE;
+          END IF;
+
+          SELECT
+            sp.rating_anchor_record_no,
+            sp.season,
+            sp.last_seen_at
+          INTO
+            v_player_anchor,
+            v_player_season,
+            v_player_last_seen
+          FROM solare_players sp
+          WHERE sp.region = NEW.region
+            AND sp.user_no = v_ev.user_no
+          FOR UPDATE;
+
+          IF NOT FOUND THEN
+            CONTINUE;
+          END IF;
+
+          IF COALESCE(v_ev.season, 9) <> COALESCE(v_player_season, 9) THEN
+            CONTINUE;
+          END IF;
+
+          SELECT MAX(e2.record_no)
+          INTO v_prev_record_no
+          FROM solare_player_rating_events e2
+          WHERE e2.region = NEW.region
+            AND e2.user_no = v_ev.user_no
+            AND e2.record_no IS NOT NULL
+            AND (v_epoch_id IS NULL OR e2.id >= v_epoch_id)
+            AND COALESCE(e2.season, 9) = COALESCE(v_player_season, 9);
+
+          v_prev_record_no := NULLIF(
+            GREATEST(
+              COALESCE(v_player_anchor, 0),
+              COALESCE(v_prev_record_no, 0)
+            ),
+            0
+          );
+
+          v_prev_at := NULL;
+          IF v_prev_record_no IS NOT NULL THEN
+            SELECT COALESCE(m.match_date, m.crawled_at)
+            INTO v_prev_at
+            FROM solare_matches m
+            WHERE m.region = NEW.region
+              AND m.record_no = v_prev_record_no
+            LIMIT 1;
+          END IF;
+          v_prev_at := COALESCE(v_prev_at, v_player_last_seen);
+
+          UPDATE solare_players sp
+          SET
+            rank_rating = CASE
+              WHEN sp.rank_rating IS NOT NULL
+                   AND COALESCE(sp.rating_anchor_record_no, 0) < NEW.record_no
+                THEN GREATEST(0, sp.rank_rating - v_applied_delta)
+              ELSE sp.rank_rating
+            END,
+            rating_achieved_record_no = CASE
+              WHEN sp.rating_achieved_record_no = NEW.record_no THEN v_prev_record_no
+              ELSE sp.rating_achieved_record_no
+            END,
+            rating_achieved_at = CASE
+              WHEN sp.rating_achieved_record_no = NEW.record_no THEN v_prev_at
+              ELSE sp.rating_achieved_at
+            END,
+            updated_at = timezone('utc', now())
+          WHERE sp.region = NEW.region
+            AND sp.user_no = v_ev.user_no;
+        END LOOP;
+      ELSIF (TG_OP = 'DELETE' AND OLD.mode = 'practice')
+         OR (TG_OP = 'UPDATE' AND OLD.mode = 'practice' AND NEW.mode = 'ranked') THEN
+        IF TG_OP = 'UPDATE' AND NEW.mode = 'ranked' THEN
+          DELETE FROM solare_practice_suspect_matches
+          WHERE region = OLD.region
+            AND record_no = OLD.record_no;
+        ELSE
+          DELETE FROM solare_practice_suspect_matches
+          WHERE region = OLD.region
+            AND record_no = OLD.record_no
+            AND reason = 'math_proof';
+        END IF;
+
+        UPDATE solare_match_players
+        SET vary_rank_rating = vary_rank_rating
+        WHERE region = OLD.region
+          AND record_no = OLD.record_no
+          AND vary_rank_rating IS NOT NULL
+          AND vary_rank_rating <> 0;
+      ELSIF TG_OP = 'INSERT' AND NEW.mode = 'ranked' THEN
+        DELETE FROM solare_practice_suspect_matches
+        WHERE region = NEW.region
+          AND record_no = NEW.record_no;
+      END IF;
+
+      IF TG_OP = 'DELETE' THEN
+        RETURN OLD;
+      END IF;
+      RETURN NEW;
+    END;
+    $$ LANGUAGE plpgsql;
+
+    DROP TRIGGER IF EXISTS trg_solare_match_mode_proof_sync ON solare_match_mode_proofs;
+
+    CREATE TRIGGER trg_solare_match_mode_proof_sync
+    AFTER INSERT OR UPDATE OF mode OR DELETE
+    ON solare_match_mode_proofs
+    FOR EACH ROW
+    EXECUTE FUNCTION fn_trg_solare_match_mode_proof_sync();
+  `);
+
   pgm.sql(`
     CREATE OR REPLACE FUNCTION fn_get_solare_monotonic_neighbor_bounds(
       p_region VARCHAR,
@@ -1684,6 +2093,276 @@ exports.up = (pgm) => {
         AND user_no = v_player.user_no;
 
       RETURN TRUE;
+    END;
+    $$ LANGUAGE plpgsql;
+  `);
+
+  pgm.sql(`
+    CREATE OR REPLACE FUNCTION fn_trg_solare_player_infer_rating()
+    RETURNS TRIGGER AS $$
+    DECLARE
+      v_snapshot_advanced BOOLEAN := FALSE;
+    BEGIN
+      IF pg_trigger_depth() > 1 THEN
+        RETURN NEW;
+      END IF;
+
+      IF TG_OP = 'INSERT' THEN
+        v_snapshot_advanced := NEW.last_seen_at IS NOT NULL;
+      ELSIF TG_OP = 'UPDATE' THEN
+        v_snapshot_advanced :=
+          (
+            NEW.last_seen_at IS NOT NULL
+            AND (OLD.last_seen_at IS NULL OR NEW.last_seen_at > OLD.last_seen_at)
+          )
+          OR NEW.win_count IS DISTINCT FROM OLD.win_count
+          OR NEW.lose_count IS DISTINCT FROM OLD.lose_count
+          OR NEW.draw_count IS DISTINCT FROM OLD.draw_count;
+      END IF;
+
+      IF NEW.current_ranking IS NOT NULL AND NEW.rating_anchor_record_no IS NULL
+         AND (
+           NEW.rank_rating IS NULL
+           OR NEW.rating_is_estimated = TRUE
+           OR v_snapshot_advanced
+         ) THEN
+        PERFORM fn_infer_unseeded_solare_player_rating(
+          NEW.region,
+          NEW.user_no,
+          NEW.user_nickname
+        );
+      END IF;
+
+      IF v_snapshot_advanced AND NEW.current_ranking IS NOT NULL AND NEW.user_no IS NOT NULL THEN
+        PERFORM fn_process_solare_player_wl_checkpoint(
+          NEW.region,
+          NEW.user_no
+        );
+      ELSIF TG_OP = 'UPDATE' AND NEW.user_no IS NOT NULL THEN
+        UPDATE solare_player_wl_checkpoints cp
+        SET
+          checkpoint_rating = sp.rank_rating,
+          checkpoint_rating_is_estimated = COALESCE(sp.rating_is_estimated, FALSE),
+          updated_at = timezone('utc', now())
+        FROM solare_players sp
+        WHERE cp.region = NEW.region
+          AND cp.user_no = NEW.user_no
+          AND cp.season = COALESCE(sp.season, 9)
+          AND sp.region = NEW.region
+          AND sp.user_no = NEW.user_no
+          AND (
+            cp.checkpoint_rating IS DISTINCT FROM sp.rank_rating
+            OR cp.checkpoint_rating_is_estimated IS DISTINCT FROM COALESCE(sp.rating_is_estimated, FALSE)
+          )
+          AND cp.checkpoint_record_no = (
+            SELECT MAX(cp2.checkpoint_record_no)
+            FROM solare_player_wl_checkpoints cp2
+            WHERE cp2.region = NEW.region
+              AND cp2.user_no = NEW.user_no
+              AND cp2.season = COALESCE(sp.season, 9)
+          )
+          AND cp.checkpoint_record_no >= GREATEST(
+            COALESCE(sp.rating_achieved_record_no, 0),
+            COALESCE(sp.rating_anchor_record_no, 0)
+          )
+          AND NOT EXISTS (
+            SELECT 1
+            FROM solare_match_players mp_after
+            LEFT JOIN solare_matches m_after
+              ON m_after.region = mp_after.region AND m_after.record_no = mp_after.record_no
+            LEFT JOIN solare_match_mode_proofs pr_after
+              ON pr_after.region = mp_after.region AND pr_after.record_no = mp_after.record_no
+            WHERE mp_after.region = NEW.region
+              AND mp_after.record_no > cp.checkpoint_record_no
+              AND COALESCE(pr_after.mode, '') <> 'practice'
+              AND (
+                mp_after.user_no = NEW.user_no
+                OR (mp_after.user_no IS NULL AND LOWER(mp_after.user_nickname) = LOWER(sp.user_nickname))
+              )
+              AND (
+                m_after.record_no IS NULL
+                OR COALESCE(m_after.season, 9) = COALESCE(sp.season, 9)
+              )
+          );
+      END IF;
+
+      RETURN NEW;
+    END;
+    $$ LANGUAGE plpgsql;
+
+    DROP TRIGGER IF EXISTS trg_solare_player_infer_rating ON solare_players;
+
+    CREATE TRIGGER trg_solare_player_infer_rating
+    AFTER INSERT OR UPDATE OF current_ranking, rank_rating, rating_is_estimated, win_count, lose_count, draw_count, last_seen_at
+    ON solare_players
+    FOR EACH ROW
+    WHEN (NEW.current_ranking IS NOT NULL)
+    EXECUTE FUNCTION fn_trg_solare_player_infer_rating();
+
+    CREATE OR REPLACE FUNCTION fn_apply_solare_match_rating_delta()
+    RETURNS TRIGGER AS $$
+    DECLARE
+      v_player RECORD;
+      v_has_inferred_event BOOLEAN;
+      v_match_at TIMESTAMPTZ;
+      v_match_season SMALLINT;
+      v_new_rating INTEGER;
+      v_achieved_record_no BIGINT;
+      v_inserted_id BIGINT;
+    BEGIN
+      IF NEW.vary_rank_rating IS NULL OR NEW.vary_rank_rating = 0 THEN
+        RETURN NEW;
+      END IF;
+
+      IF EXISTS (
+        SELECT 1
+        FROM solare_match_mode_proofs smp
+        WHERE smp.region = NEW.region
+          AND smp.record_no = NEW.record_no
+          AND smp.mode = 'practice'
+      ) THEN
+        RETURN NEW;
+      END IF;
+
+      SELECT
+        user_no,
+        user_nickname,
+        season,
+        current_ranking,
+        rank_rating,
+        rating_is_estimated,
+        rating_anchor_record_no,
+        rating_achieved_record_no
+      INTO v_player
+      FROM solare_players
+      WHERE region = NEW.region
+        AND (
+          (NEW.user_no IS NOT NULL AND user_no = NEW.user_no)
+          OR (NEW.user_no IS NULL AND LOWER(user_nickname) = LOWER(NEW.user_nickname))
+        )
+      ORDER BY updated_at DESC
+      LIMIT 1
+      FOR UPDATE;
+
+      IF NOT FOUND THEN
+        RETURN NEW;
+      END IF;
+
+      SELECT
+        m.season,
+        COALESCE(m.match_date, m.crawled_at, NEW.created_at, timezone('utc', now()))
+      INTO
+        v_match_season,
+        v_match_at
+      FROM solare_matches m
+      WHERE m.region = NEW.region AND m.record_no = NEW.record_no
+      LIMIT 1;
+
+      IF FOUND AND COALESCE(v_match_season, 9) <> COALESCE(v_player.season, 9) THEN
+        RETURN NEW;
+      END IF;
+
+      IF v_player.rank_rating IS NULL THEN
+        PERFORM fn_infer_unseeded_solare_player_rating(
+          NEW.region,
+          v_player.user_no,
+          v_player.user_nickname
+        );
+        RETURN NEW;
+      END IF;
+
+      IF v_player.rating_anchor_record_no IS NULL THEN
+        SELECT EXISTS (
+          SELECT 1
+          FROM solare_player_rating_events e
+          WHERE e.region = NEW.region
+            AND e.user_no = v_player.user_no
+            AND e.event_type = 'inferred_start'
+            AND COALESCE(e.season, 9) = COALESCE(v_player.season, 9)
+            AND e.id > COALESCE((
+              SELECT MAX(ep.id)
+              FROM solare_player_rating_events ep
+              WHERE ep.region = NEW.region
+                AND ep.user_no = v_player.user_no
+                AND ep.event_type IN ('season_reset', 'seed_anchor', 'reconcile')
+            ), 0)
+        ) INTO v_has_inferred_event;
+
+        IF v_has_inferred_event OR COALESCE(v_player.rating_is_estimated, FALSE) THEN
+          PERFORM fn_infer_unseeded_solare_player_rating(
+            NEW.region,
+            v_player.user_no,
+            v_player.user_nickname
+          );
+          RETURN NEW;
+        END IF;
+      END IF;
+
+      IF NEW.record_no <= COALESCE(v_player.rating_anchor_record_no, 0) THEN
+        RETURN NEW;
+      END IF;
+
+      v_new_rating := GREATEST(0, v_player.rank_rating + NEW.vary_rank_rating);
+
+      INSERT INTO solare_player_rating_events (
+        region,
+        season,
+        user_no,
+        user_nickname,
+        event_type,
+        previous_rating,
+        new_rating,
+        rating_delta,
+        record_no,
+        metadata
+      )
+      VALUES (
+        NEW.region,
+        v_player.season,
+        v_player.user_no,
+        v_player.user_nickname,
+        'match_delta',
+        v_player.rank_rating,
+        v_new_rating,
+        NEW.vary_rank_rating,
+        NEW.record_no,
+        jsonb_build_object(
+          'is_winner', NEW.is_winner,
+          'class_type', NEW.class_type,
+          'skill_branch_type', NEW.skill_branch_type
+        )
+      )
+      ON CONFLICT (region, user_no, record_no)
+      WHERE event_type = 'match_delta' AND record_no IS NOT NULL
+      DO NOTHING
+      RETURNING id INTO v_inserted_id;
+
+      IF v_inserted_id IS NULL THEN
+        RETURN NEW;
+      END IF;
+
+      IF v_match_at IS NULL THEN
+        v_match_at := COALESCE(NEW.created_at, timezone('utc', now()));
+      END IF;
+
+      v_achieved_record_no := GREATEST(
+        COALESCE(v_player.rating_achieved_record_no, 0),
+        NEW.record_no
+      );
+
+      UPDATE solare_players
+      SET
+        rank_rating = v_new_rating,
+        rating_achieved_record_no = v_achieved_record_no,
+        rating_achieved_at = CASE
+          WHEN NEW.record_no >= COALESCE(v_player.rating_achieved_record_no, 0) THEN v_match_at
+          ELSE COALESCE(rating_achieved_at, v_match_at)
+        END,
+        updated_at = timezone('utc', now())
+      WHERE region = NEW.region
+        AND user_no = v_player.user_no;
+
+      RETURN NEW;
     END;
     $$ LANGUAGE plpgsql;
   `);
