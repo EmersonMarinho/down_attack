@@ -17,11 +17,13 @@ export default controller.handle({
       "Cache-Control",
       "public, max-age=0, s-maxage=10, stale-while-revalidate=10",
     );
-    setHeader(
-      event,
-      "Vary",
-      "x-vercel-ip-country, cf-ipcountry, x-country-code",
-    );
+    if (!query.region) {
+      setHeader(
+        event,
+        "Vary",
+        "x-vercel-ip-country, cf-ipcountry, x-country-code",
+      );
+    }
 
     return playerProfile;
   },

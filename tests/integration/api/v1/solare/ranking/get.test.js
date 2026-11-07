@@ -126,6 +126,10 @@ describe("GET /api/v1/solare/ranking", () => {
         `${webserver.origin}/api/v1/solare/ranking?region=sa`,
       );
       expect(saRes.status).toBe(200);
+      expect(saRes.headers.get("cache-control")).toBe(
+        "public, max-age=0, s-maxage=300, stale-while-revalidate=300",
+      );
+      expect(saRes.headers.get("vary")).toBeNull();
       const saBody = await saRes.json();
 
       expect(saBody.region).toBe("SA");
@@ -170,6 +174,9 @@ describe("GET /api/v1/solare/ranking", () => {
         },
       );
       expect(naGeoRes.status).toBe(200);
+      expect(naGeoRes.headers.get("vary")).toBe(
+        "x-vercel-ip-country, cf-ipcountry, x-country-code",
+      );
       const naGeoBody = await naGeoRes.json();
       expect(naGeoBody.region).toBe("NA");
       expect(naGeoBody.players).toHaveLength(1);

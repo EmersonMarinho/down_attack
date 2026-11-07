@@ -13,13 +13,15 @@ export default controller.handle({
     setHeader(
       event,
       "Cache-Control",
-      "public, max-age=0, s-maxage=30, stale-while-revalidate=30",
+      "public, max-age=0, s-maxage=300, stale-while-revalidate=300",
     );
-    setHeader(
-      event,
-      "Vary",
-      "x-vercel-ip-country, cf-ipcountry, x-country-code",
-    );
+    if (!query.region) {
+      setHeader(
+        event,
+        "Vary",
+        "x-vercel-ip-country, cf-ipcountry, x-country-code",
+      );
+    }
 
     return rankingData;
   },

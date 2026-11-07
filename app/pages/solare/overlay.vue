@@ -659,7 +659,7 @@
                     </h3>
                   </div>
                   <span class="text-[11px] font-mono text-[#c5a059]">
-                    AUTO-REFRESH 20s
+                    AUTO-REFRESH 30s
                   </span>
                 </div>
 
@@ -894,7 +894,7 @@
                   Keep this URL private. Anyone with your token URL can view
                   your overlay, and whenever you click
                   <strong class="text-stone-300">"Reset Session"</strong> here,
-                  your OBS overlay updates automatically within 20 seconds
+                  your OBS overlay updates automatically within 30 seconds
                   without changing the URL!
                 </div>
               </div>
@@ -1675,7 +1675,7 @@ async function handleStartOrResetSession() {
 
     sessionButtonLabel.value = `SESSION LIVE (${body.anchor_rating} BASELINE)`;
     sessionFeedbackIsError.value = false;
-    sessionFeedbackMessage.value = `Session baseline set to ${body.anchor_rating} PTS. OBS overlay will update within 20s!`;
+    sessionFeedbackMessage.value = `Session baseline set to ${body.anchor_rating} PTS. OBS overlay will update within 30s!`;
 
     setTimeout(() => {
       sessionButtonLabel.value = "START / RESET TODAY'S SESSION";
@@ -1752,12 +1752,12 @@ async function syncDashboardOverlay() {
 onMounted(async () => {
   if (isObsWidgetMode.value) {
     fetchOverlayWidget();
-    pollTimer = setInterval(fetchOverlayWidget, 20000);
+    pollTimer = setInterval(fetchOverlayWidget, 30000);
     return;
   }
 
   syncClockInterval = setInterval(() => {
-    if (syncSecondsAgo.value >= 20) {
+    if (syncSecondsAgo.value >= 30) {
       syncSecondsAgo.value = 1;
       syncDashboardOverlay();
     } else {
