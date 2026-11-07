@@ -1172,6 +1172,20 @@ const layoutMode = computed(() => {
   return raw === "horizontal" ? "horizontal" : "vertical";
 });
 
+function buildOverlayEtag(data) {
+  if (
+    !data ||
+    data.latest_record_no === undefined ||
+    data.latest_record_no === null
+  ) {
+    return null;
+  }
+  if (data.session) {
+    return `W/"${data.latest_record_no}:${data.session.anchor_record_no}:${data.session.session_start_record_no}:${data.session.anchor_rating}"`;
+  }
+  return `W/"${data.latest_record_no}"`;
+}
+
 async function fetchOverlayWidget() {
   const token = route.query.token ? String(route.query.token).trim() : "";
   const nick = route.query.nick ? String(route.query.nick).trim() : "";
@@ -1191,8 +1205,26 @@ async function fetchOverlayWidget() {
     params.set("region", region);
   }
 
+  if (
+    overlayData.value?.latest_record_no !== undefined &&
+    overlayData.value?.latest_record_no !== null
+  ) {
+    params.set("since", String(overlayData.value.latest_record_no));
+  }
+
+  const etag = buildOverlayEtag(overlayData.value);
+
   try {
-    const response = await fetch(`/api/v1/solare/overlay?${params.toString()}`);
+    const response = await fetch(
+      `/api/v1/solare/overlay?${params.toString()}`,
+      etag ? { headers: { "If-None-Match": etag } } : undefined,
+    );
+
+    if (response.status === 304) {
+      errorMessage.value = "";
+      return;
+    }
+
     const body = await response.json();
 
     if (!response.ok) {
@@ -1736,7 +1768,21 @@ async function syncDashboardOverlay() {
       return;
     }
 
-    const res = await fetch(`/api/v1/solare/overlay?${params.toString()}`);
+    if (
+      livePlayerData.value?.latest_record_no !== undefined &&
+      livePlayerData.value?.latest_record_no !== null
+    ) {
+      params.set("since", String(livePlayerData.value.latest_record_no));
+    }
+
+    const etag = buildOverlayEtag(livePlayerData.value);
+    const res = await fetch(
+      `/api/v1/solare/overlay?${params.toString()}`,
+      etag ? { headers: { "If-None-Match": etag } } : undefined,
+    );
+    if (res.status === 304) {
+      return;
+    }
     if (res.ok) {
       const body = await res.json();
       livePlayerData.value = body;

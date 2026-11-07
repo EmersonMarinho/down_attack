@@ -94,6 +94,28 @@ describe("GET /api/v1/solare/overlay", () => {
         action: "Check if the Family Name and region are spelled correctly.",
         status_code: 404,
       });
+
+      const responseWithSince = await fetch(
+        `${webserver.origin}/api/v1/solare/overlay?nick=GhostPlayer999&region=SA&since=920908`,
+      );
+      expect(responseWithSince.status).toBe(404);
+    });
+
+    test("With invalid since parameter", async () => {
+      const response = await fetch(
+        `${webserver.origin}/api/v1/solare/overlay?nick=Shxtey&region=SA&since=invalid`,
+      );
+
+      expect(response.status).toBe(400);
+
+      const responseBody = await response.json();
+
+      expect(responseBody).toEqual({
+        name: "ValidationError",
+        message: '"since" must be a non-negative integer.',
+        action: "Please provide a valid match record_no for since.",
+        status_code: 400,
+      });
     });
 
     test("With valid nick, session token, and player outside Top 100", async () => {
@@ -404,6 +426,76 @@ describe("GET /api/v1/solare/overlay", () => {
       expect(fullStreakBody.session.recent_deltas).toEqual([
         25, -20, 33, 30, 30,
       ]);
+      const fullStreakEtag = fullStreakResponse.headers.get("etag");
+      expect(fullStreakEtag).toBe('W/"930010:930000:930000:1500"');
+
+      // Polling with matching since returns 304 Not Modified with empty body
+      const notModifiedBySince = await fetch(
+        `${webserver.origin}/api/v1/solare/overlay?token=${createdSession.token}&since=930010`,
+      );
+      expect(notModifiedBySince.status).toBe(304);
+      expect(notModifiedBySince.headers.get("etag")).toBe(fullStreakEtag);
+      expect(await notModifiedBySince.text()).toBe("");
+
+      // Polling by nick+region with since_record_no also returns 304 Not Modified
+      const notModifiedByNick = await fetch(
+        `${webserver.origin}/api/v1/solare/overlay?nick=Okazaki&region=SA&since_record_no=930010`,
+      );
+      expect(notModifiedByNick.status).toBe(304);
+      expect(notModifiedByNick.headers.get("etag")).toBe('W/"930010"');
+      expect(await notModifiedByNick.text()).toBe("");
+
+      // Polling with older since returns 200 OK with full payload
+      const staleSinceResponse = await fetch(
+        `${webserver.origin}/api/v1/solare/overlay?token=${createdSession.token}&since=930009`,
+      );
+      expect(staleSinceResponse.status).toBe(200);
+      const staleSinceBody = await staleSinceResponse.json();
+      expect(staleSinceBody.latest_record_no).toBe(930010);
+
+      // Resetting the session at the same latest_record_no (930010) invalidates the previous session ETag
+      const resetSessionRes = await fetch(
+        `${webserver.origin}/api/v1/solare/session`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            token: createdSession.token,
+            nick: "Okazaki",
+            region: "SA",
+            rating: 1750,
+          }),
+        },
+      );
+      expect(resetSessionRes.status).toBe(200);
+
+      const afterResetWithOldEtag = await fetch(
+        `${webserver.origin}/api/v1/solare/overlay?token=${createdSession.token}&since=930010`,
+        {
+          headers: {
+            "If-None-Match": fullStreakEtag,
+          },
+        },
+      );
+      expect(afterResetWithOldEtag.status).toBe(200);
+      const afterResetBody = await afterResetWithOldEtag.json();
+      expect(afterResetBody.rating).toBe(1750);
+      expect(afterResetBody.session.anchor_rating).toBe(1750);
+      expect(afterResetBody.session.total_games).toBe(0);
+
+      const newSessionEtag = afterResetWithOldEtag.headers.get("etag");
+      expect(newSessionEtag).toBe('W/"930010:930010:930010:1750"');
+
+      // Subsequent poll with the updated session ETag returns 304 Not Modified
+      const afterResetNotModified = await fetch(
+        `${webserver.origin}/api/v1/solare/overlay?token=${createdSession.token}&since=930010`,
+        {
+          headers: {
+            "If-None-Match": newSessionEtag,
+          },
+        },
+      );
+      expect(afterResetNotModified.status).toBe(304);
     });
   });
 });
