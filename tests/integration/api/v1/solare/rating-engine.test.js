@@ -1692,5 +1692,120 @@ describe("Solare Continuous Elo Rating Engine", () => {
       );
       expect(malformedRes.status).toBe(400);
     });
+
+    test("resolves inverted neighbor brackets via monotonic bounds and infers exact base-401 tail players", async () => {
+      const nowIso = new Date().toISOString();
+
+      // Seed Rank #1425 (1262), stale inverted Rank #1427 (1284 > 1262), and monotonic Rank #1428 (1239)
+      await orchestrator.createSolarePlayer({
+        region: "SA",
+        season: 9,
+        user_no: 881425,
+        user_nickname: "SaNeighbor1425",
+        current_ranking: 1425,
+        win_count: 62,
+        lose_count: 66,
+        rank_rating: 1262,
+        rating_anchor_record_no: 998000,
+        rating_achieved_record_no: 998000,
+        last_seen_at: nowIso,
+      });
+
+      await orchestrator.createSolarePlayer({
+        region: "SA",
+        season: 9,
+        user_no: 881427,
+        user_nickname: "SaStaleInverted1427",
+        current_ranking: 1427,
+        win_count: 15,
+        lose_count: 10,
+        rank_rating: 1284,
+        rating_anchor_record_no: 998000,
+        rating_achieved_record_no: 998000,
+        last_seen_at: nowIso,
+      });
+
+      await orchestrator.createSolarePlayer({
+        region: "SA",
+        season: 9,
+        user_no: 881428,
+        user_nickname: "SaMonotonic1428",
+        current_ranking: 1428,
+        win_count: 18,
+        lose_count: 14,
+        rank_rating: 1239,
+        rating_anchor_record_no: 998000,
+        rating_achieved_record_no: 998000,
+        last_seen_at: nowIso,
+      });
+
+      // Rank #1426 (JDPAULISTA scenario): unseeded between #1425 (1262) and inverted #1427 (1284).
+      // Trigger skips #1427 (1284) and interpolates between #1425 (1262) and #1428 (1239) -> 1254.
+      await orchestrator.createSolarePlayer({
+        region: "SA",
+        season: 9,
+        user_no: 881426,
+        user_nickname: "SaBlocked1426",
+        current_ranking: 1426,
+        win_count: 54,
+        lose_count: 48,
+        rank_rating: null,
+        last_seen_at: nowIso,
+      });
+
+      const p1426 = await database.query({
+        text: "SELECT rank_rating, rating_is_estimated FROM solare_players WHERE region = 'SA' AND user_no = 881426;",
+      });
+      expect(p1426.rows[0]).toEqual({
+        rank_rating: 1254,
+        rating_is_estimated: true,
+      });
+
+      // Seed lowest anchored rank #3959 at 785 Elo
+      await orchestrator.createSolarePlayer({
+        region: "SA",
+        season: 9,
+        user_no: 883959,
+        user_nickname: "SaAnchor3959",
+        current_ranking: 3959,
+        win_count: 31,
+        lose_count: 38,
+        rank_rating: 785,
+        rating_anchor_record_no: 998000,
+        rating_achieved_record_no: 998000,
+        last_seen_at: nowIso,
+      });
+
+      // Tail player #3963 with 0 lower neighbors (v_lower_bound IS NULL), 1W/0L (+383 -> 401 + 383 = 784 <= 785)
+      await orchestrator.createSolarePlayer({
+        region: "SA",
+        season: 9,
+        user_no: 883963,
+        user_nickname: "SaTail3963",
+        current_ranking: 3963,
+        win_count: 1,
+        lose_count: 0,
+        rank_rating: null,
+        last_seen_at: new Date(Date.now() + 60000).toISOString(),
+      });
+
+      await orchestrator.createSolareMatch({
+        region: "SA",
+        season: 9,
+        record_no: 998010,
+        user_nickname: "SaTail3963",
+        user_no: 883963,
+        is_winner: true,
+        vary_rank_rating: 383,
+      });
+
+      const p3963 = await database.query({
+        text: "SELECT rank_rating, rating_is_estimated FROM solare_players WHERE region = 'SA' AND user_no = 883963;",
+      });
+      expect(p3963.rows[0]).toEqual({
+        rank_rating: 784,
+        rating_is_estimated: false,
+      });
+    });
   });
 });

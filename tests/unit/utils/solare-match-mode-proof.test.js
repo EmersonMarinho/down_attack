@@ -1061,6 +1061,99 @@ describe("server/utils/solareMatchModeProof.js", () => {
       expect(invalidatedPractice.has(9001)).toBe(true);
       expect(invalidatedPractice.has(9002)).toBe(true);
     });
+
+    test("resolves inverted adjacent neighbor brackets via monotonic Candidate A / Candidate B", () => {
+      // Rank #1425 has 1262, Rank #1427 has stale 1284 (> 1262!), and Rank #1428 has 1239.
+      // Player 91 at Rank #1426 has 1 Ranked win (+25 from 1230 -> 1255) and 1 Practice win (+60).
+      // bracketOf(91) skips inverted Rank #1427 (1284) and uses monotonic [1239, 1262].
+      const players = [
+        {
+          user_no: 90,
+          current_ranking: 1425,
+          win_count: 50,
+          lose_count: 45,
+          rank_rating: 1262,
+        },
+        {
+          user_no: 91,
+          current_ranking: 1426,
+          win_count: 51,
+          lose_count: 48,
+          rank_rating: null,
+        },
+        {
+          user_no: 92,
+          current_ranking: 1427,
+          win_count: 15,
+          lose_count: 10,
+          rank_rating: 1284,
+        },
+        {
+          user_no: 93,
+          current_ranking: 1428,
+          win_count: 18,
+          lose_count: 14,
+          rank_rating: 1239,
+        },
+      ];
+
+      const matchRows = [
+        {
+          record_no: 9101,
+          repz: false,
+          user_no: 91,
+          is_winner: true,
+          vary_rank_rating: 25,
+          has_winner: true,
+        },
+        {
+          record_no: 9102,
+          repz: false,
+          user_no: 91,
+          is_winner: true,
+          vary_rank_rating: 60,
+          has_winner: true,
+        },
+      ];
+
+      const checkpoints = [
+        {
+          user_no: 91,
+          checkpoint_record_no: 9100,
+          checkpoint_at: "2026-11-06T12:00:00.000Z",
+          win_count: 50,
+          lose_count: 48,
+          draw_count: 0,
+          checkpoint_rating: 1230,
+          checkpoint_rating_is_estimated: false,
+        },
+        {
+          user_no: 91,
+          checkpoint_record_no: 9102,
+          checkpoint_at: "2026-11-06T13:00:00.000Z",
+          win_count: 51,
+          lose_count: 48,
+          draw_count: 0,
+          checkpoint_rating: null,
+          checkpoint_rating_is_estimated: false,
+        },
+      ];
+
+      const { proofs } = computeMatchModeProofs({
+        players,
+        matchRows,
+        checkpoints,
+      });
+
+      expect(proofs.get(9102)).toEqual({
+        mode: "practice",
+        method: "checkpoint_math",
+      });
+      expect(proofs.get(9101)).toEqual({
+        mode: "ranked",
+        method: "checkpoint_math",
+      });
+    });
   });
 
   describe("solare.verifyCronBearerToken()", () => {

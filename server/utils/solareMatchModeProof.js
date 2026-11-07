@@ -567,22 +567,74 @@ export function computeMatchModeProofs({
       return { up: null, low: null };
     }
     const rk = entry.rk;
-    let up = rk === 1 ? 99999 : null;
-    let low = null;
+    let upA = null;
+    let lowB = null;
 
     for (const f of freshSorted) {
       if (f.uid === uid) {
         continue;
       }
       if (f.rk < rk) {
-        up = f.rating;
+        upA = f;
       } else if (f.rk > rk) {
-        low = f.rating;
+        lowB = f;
         break;
       }
     }
 
-    return { up, low };
+    if (rk === 1) {
+      return { up: 99999, low: lowB ? lowB.rating : null };
+    }
+
+    if (!upA || !lowB || upA.rating >= lowB.rating) {
+      return {
+        up: upA ? upA.rating : null,
+        low: lowB ? lowB.rating : null,
+      };
+    }
+
+    // Resolve inverted immediate neighbors (upA.rating < lowB.rating) via monotonic Candidate A vs Candidate B
+    let lowA = null;
+    for (const f of freshSorted) {
+      if (f.uid !== uid && f.rk > lowB.rk && f.rating <= upA.rating) {
+        lowA = f;
+        break;
+      }
+    }
+
+    let upB = null;
+    for (const f of freshSorted) {
+      if (f.uid !== uid && f.rk < upA.rk && f.rating >= lowB.rating) {
+        upB = f;
+      }
+    }
+
+    if (lowA && upB) {
+      const gapA = upA.rating - lowA.rating;
+      const gapB = upB.rating - lowB.rating;
+      const tightA = gapA <= 40;
+      const tightB = gapB <= 40;
+      const spanA = lowA.rk - upA.rk;
+      const spanB = lowB.rk - upB.rk;
+
+      const preferA =
+        (tightA && !tightB) ||
+        (tightA === tightB && spanA < spanB) ||
+        (tightA === tightB && spanA === spanB && gapA <= gapB);
+
+      return preferA
+        ? { up: upA.rating, low: lowA.rating }
+        : { up: upB.rating, low: lowB.rating };
+    }
+
+    if (lowA) {
+      return { up: upA.rating, low: lowA.rating };
+    }
+    if (upB) {
+      return { up: upB.rating, low: lowB.rating };
+    }
+
+    return { up: upA.rating, low: lowB.rating };
   };
 
   const solveSubset = ({ uid, cand, need, baseDeltaSum, bases, low, up }) => {
