@@ -429,6 +429,10 @@ describe("GET /api/v1/solare/player", () => {
         `${webserver.origin}/api/v1/solare/player?nick=shamsir&region=sa`,
       );
       expect(shamsirRes.status).toBe(200);
+      expect(shamsirRes.headers.get("cache-control")).toBe(
+        "public, max-age=0, s-maxage=10, stale-while-revalidate=10",
+      );
+      expect(shamsirRes.headers.get("vary")).toBeNull();
       const shamsirBody = await shamsirRes.json();
 
       expect(shamsirBody.region).toBe("SA");
@@ -579,6 +583,9 @@ describe("GET /api/v1/solare/player", () => {
       );
 
       expect(naResponse.status).toBe(200);
+      expect(naResponse.headers.get("vary")).toBe(
+        "x-vercel-ip-country, cf-ipcountry, x-country-code",
+      );
       const naBody = await naResponse.json();
       expect(naBody.region).toBe("NA");
       expect(naBody.user_nickname).toBe("NaPlayerOne");

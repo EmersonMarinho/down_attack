@@ -405,6 +405,49 @@ function validateToken(token) {
   return token.trim();
 }
 
+function validateSinceRecordNo(since) {
+  if (isEmptyParam(since)) {
+    return null;
+  }
+
+  const parsed = Number(since);
+
+  if (
+    typeof since === "boolean" ||
+    Array.isArray(since) ||
+    !Number.isSafeInteger(parsed) ||
+    parsed < 0
+  ) {
+    throw new ValidationError({
+      message: '"since" must be a non-negative integer.',
+      action: "Please provide a valid match record_no for since.",
+    });
+  }
+
+  return parsed;
+}
+
+function parseRecordNoFromEtag(etag) {
+  if (typeof etag !== "string") {
+    return null;
+  }
+
+  const match = etag.trim().match(/^(?:W\/)?"(\d+)(?::\d+:\d+:-?\d+)?"$/);
+  if (!match) {
+    return null;
+  }
+
+  const parsed = Number(match[1]);
+  return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : null;
+}
+
+function buildOverlayEtag({ latestRecordNo, sessionRow }) {
+  if (sessionRow) {
+    return `W/"${latestRecordNo}:${Number(sessionRow.anchor_record_no)}:${Number(sessionRow.session_start_record_no)}:${Number(sessionRow.anchor_rating)}"`;
+  }
+  return `W/"${latestRecordNo}"`;
+}
+
 async function findPlayerIdentityAndWatermark(
   region,
   nick,
@@ -678,8 +721,19 @@ async function createOrResetSession(sessionInput) {
   }
 }
 
-async function getOverlayData({ nick, region, token } = {}) {
+async function getOverlayData({
+  nick,
+  region,
+  token,
+  since,
+  ifNoneMatch,
+} = {}) {
   const validatedToken = validateToken(token);
+  const validatedSince = validateSinceRecordNo(since);
+  const targetSinceRecordNo =
+    validatedSince !== null
+      ? validatedSince
+      : parseRecordNoFromEtag(ifNoneMatch);
 
   if (
     !validatedToken &&
@@ -762,6 +816,66 @@ async function getOverlayData({ nick, region, token } = {}) {
 
   const playerRow = playerResult.rows[0] || null;
   const resolvedUserNo = playerRow?.user_no || targetUserNo || null;
+
+  if (targetSinceRecordNo !== null) {
+    const latestRecordResult = await database.query({
+      text: `
+        SELECT
+          COUNT(*)::int AS total_matches,
+          MAX(mp.record_no) AS max_record_no
+        FROM
+          solare_match_players mp
+        WHERE
+          mp.region = $1
+          AND (
+            ($3::bigint IS NOT NULL AND mp.user_no = $3::bigint)
+            OR LOWER(mp.user_nickname) = LOWER($2)
+          )
+          AND NOT EXISTS (
+            SELECT 1
+            FROM solare_match_mode_proofs smp
+            WHERE smp.region = mp.region
+              AND smp.record_no = mp.record_no
+              AND smp.mode = 'practice'
+          )
+        ;`,
+      values: [targetRegion, targetNick, resolvedUserNo],
+    });
+
+    const totalMatchesCount = Number(
+      latestRecordResult.rows[0]?.total_matches || 0,
+    );
+    const currentLatestRecordNo = latestRecordResult.rows[0]?.max_record_no
+      ? Number(latestRecordResult.rows[0].max_record_no)
+      : 0;
+
+    if (!playerRow && totalMatchesCount === 0) {
+      throw new NotFoundError({
+        message: `Player '${targetNick}' was not found in region '${targetRegion}'.`,
+        action: "Check if the Family Name and region are spelled correctly.",
+      });
+    }
+
+    const currentEtag = buildOverlayEtag({
+      latestRecordNo: currentLatestRecordNo,
+      sessionRow,
+    });
+    const trimmedIfNoneMatch =
+      typeof ifNoneMatch === "string" ? ifNoneMatch.trim() : "";
+    const etagMatches =
+      trimmedIfNoneMatch.length === 0 ||
+      trimmedIfNoneMatch === currentEtag ||
+      trimmedIfNoneMatch === `"${currentLatestRecordNo}"` ||
+      trimmedIfNoneMatch === `W/"${currentLatestRecordNo}"`;
+
+    if (currentLatestRecordNo === targetSinceRecordNo && etagMatches) {
+      return {
+        not_modified: true,
+        latest_record_no: currentLatestRecordNo,
+        etag: currentEtag,
+      };
+    }
+  }
 
   const matchesResult = await database.query({
     text: `

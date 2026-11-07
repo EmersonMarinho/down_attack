@@ -2,6 +2,10 @@ export default controller.handle({
   get: async (event) => {
     const query = getQuery(event);
     const headers = getHeaders(event);
+    const hasExplicitRegion =
+      typeof query.region === "string"
+        ? query.region.trim().length > 0
+        : Boolean(query.region);
 
     const rankingData = await solare.getRanking({
       region: query.region,
@@ -13,13 +17,15 @@ export default controller.handle({
     setHeader(
       event,
       "Cache-Control",
-      "public, max-age=0, s-maxage=30, stale-while-revalidate=30",
+      "public, max-age=0, s-maxage=300, stale-while-revalidate=300",
     );
-    setHeader(
-      event,
-      "Vary",
-      "x-vercel-ip-country, cf-ipcountry, x-country-code",
-    );
+    if (!hasExplicitRegion) {
+      setHeader(
+        event,
+        "Vary",
+        "x-vercel-ip-country, cf-ipcountry, x-country-code",
+      );
+    }
 
     return rankingData;
   },
