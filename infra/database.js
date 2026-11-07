@@ -33,15 +33,32 @@ function getDatabaseCredentials() {
 
 let pool;
 
+function isServerlessEnvironment() {
+  return Boolean(process.env.VERCEL_ENV || process.env.VERCEL);
+}
+
+function getPoolConfig() {
+  const serverless = isServerlessEnvironment();
+  const explicitMax = Number(process.env.POSTGRES_MAX_CONNECTIONS);
+  const max =
+    Number.isInteger(explicitMax) && explicitMax > 0
+      ? explicitMax
+      : serverless
+        ? 1
+        : 10;
+
+  return {
+    ...getDatabaseCredentials(),
+    max,
+    idleTimeoutMillis: serverless ? 5000 : 30000,
+    connectionTimeoutMillis: 15000,
+    allowExitOnIdle: true,
+  };
+}
+
 function getPool() {
   if (!pool) {
-    pool = new Pool({
-      ...getDatabaseCredentials(),
-      max: 10,
-      idleTimeoutMillis: 30000,
-      connectionTimeoutMillis: 15000,
-      allowExitOnIdle: true,
-    });
+    pool = new Pool(getPoolConfig());
   }
   return pool;
 }
@@ -88,6 +105,7 @@ async function getNewClient() {
 const database = {
   query,
   getNewClient,
+  getPoolConfig,
 };
 
 export default database;
