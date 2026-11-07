@@ -10,6 +10,10 @@ import {
   getSkillBranch,
   getTierInfo,
 } from "~~/app/utils/solareTier.js";
+import {
+  computeMatchModeProofs,
+  proveRegionMatchModes,
+} from "~~/server/utils/solareMatchModeProof.js";
 
 const VALID_REGIONS = ["SA", "NA", "EU", "KR", "JP", "RU", "TR", "TW"];
 
@@ -189,19 +193,26 @@ async function getEnrichedMatchHistory(region, nick, userNo = null) {
   const result = await database.query({
     text: `
       SELECT
-        record_no,
-        is_winner,
-        vary_rank_rating
+        mp.record_no,
+        mp.is_winner,
+        mp.vary_rank_rating
       FROM
-        solare_match_players
+        solare_match_players mp
       WHERE
-        region = $1
+        mp.region = $1
         AND (
-          ($3::bigint IS NOT NULL AND user_no = $3::bigint)
-          OR LOWER(user_nickname) = LOWER($2)
+          ($3::bigint IS NOT NULL AND mp.user_no = $3::bigint)
+          OR LOWER(mp.user_nickname) = LOWER($2)
+        )
+        AND NOT EXISTS (
+          SELECT 1
+          FROM solare_match_mode_proofs smp
+          WHERE smp.region = mp.region
+            AND smp.record_no = mp.record_no
+            AND smp.mode = 'practice'
         )
       ORDER BY
-        record_no ASC
+        mp.record_no ASC
       ;`,
     values: [region, nick, userNo],
   });
@@ -425,17 +436,24 @@ async function findPlayerIdentityAndWatermark(
   const matchResult = await database.query({
     text: `
       SELECT
-        MAX(record_no) AS latest_record_no,
-        (ARRAY_AGG(user_nickname ORDER BY record_no DESC))[1] AS latest_nickname,
-        (ARRAY_AGG(user_no ORDER BY record_no DESC) FILTER (WHERE user_no IS NOT NULL))[1] AS latest_user_no,
+        MAX(mp.record_no) AS latest_record_no,
+        (ARRAY_AGG(mp.user_nickname ORDER BY mp.record_no DESC))[1] AS latest_nickname,
+        (ARRAY_AGG(mp.user_no ORDER BY mp.record_no DESC) FILTER (WHERE mp.user_no IS NOT NULL))[1] AS latest_user_no,
         COUNT(*)::int AS match_count
       FROM
-        solare_match_players
+        solare_match_players mp
       WHERE
-        region = $1
+        mp.region = $1
         AND (
-          ($3::bigint IS NOT NULL AND user_no = $3::bigint)
-          OR LOWER(user_nickname) = LOWER($2)
+          ($3::bigint IS NOT NULL AND mp.user_no = $3::bigint)
+          OR LOWER(mp.user_nickname) = LOWER($2)
+        )
+        AND NOT EXISTS (
+          SELECT 1
+          FROM solare_match_mode_proofs smp
+          WHERE smp.region = mp.region
+            AND smp.record_no = mp.record_no
+            AND smp.mode = 'practice'
         )
       ;`,
     values: [region, nick, resolvedUserNo],
@@ -772,6 +790,13 @@ async function getOverlayData({ nick, region, token } = {}) {
         AND (
           ($3::bigint IS NOT NULL AND mp.user_no = $3::bigint)
           OR LOWER(mp.user_nickname) = LOWER($2)
+        )
+        AND NOT EXISTS (
+          SELECT 1
+          FROM solare_match_mode_proofs smp
+          WHERE smp.region = mp.region
+            AND smp.record_no = mp.record_no
+            AND smp.mode = 'practice'
         )
       ORDER BY
         mp.record_no ASC
@@ -1116,6 +1141,13 @@ async function getPlayerProfile({
               ($3::bigint IS NOT NULL AND mp.user_no = $3::bigint)
               OR (($3::bigint IS NULL OR mp.user_no IS NULL) AND LOWER(mp.user_nickname) = LOWER($2))
             )
+            AND NOT EXISTS (
+              SELECT 1
+              FROM solare_match_mode_proofs smp
+              WHERE smp.region = mp.region
+                AND smp.record_no = mp.record_no
+                AND smp.mode = 'practice'
+            )
           ;`,
         values: [targetRegion, targetNick, resolvedUserNo],
       });
@@ -1163,6 +1195,13 @@ async function getPlayerProfile({
         AND (
           ($3::bigint IS NOT NULL AND mp.user_no = $3::bigint)
           OR (($3::bigint IS NULL OR mp.user_no IS NULL) AND LOWER(mp.user_nickname) = LOWER($2))
+        )
+        AND NOT EXISTS (
+          SELECT 1
+          FROM solare_match_mode_proofs smp
+          WHERE smp.region = mp.region
+            AND smp.record_no = mp.record_no
+            AND smp.mode = 'practice'
         )
       ORDER BY
         mp.record_no DESC
@@ -1518,6 +1557,13 @@ async function getPlayerProfile({
                 (dr.user_no IS NOT NULL AND mp.user_no = dr.user_no)
                 OR ((dr.user_no IS NULL OR mp.user_no IS NULL) AND LOWER(mp.user_nickname) = LOWER(dr.user_nickname))
               )
+              AND NOT EXISTS (
+                SELECT 1
+                FROM solare_match_mode_proofs smp
+                WHERE smp.region = mp.region
+                  AND smp.record_no = mp.record_no
+                  AND smp.mode = 'practice'
+              )
             GROUP BY
               mp.class_type,
               mp.skill_branch_type
@@ -1601,6 +1647,9 @@ async function getPlayerProfile({
     official_ranking: activeOfficialRanking,
     class_ranking: activeClassRanking,
     rank_rating: activeRankRating,
+    rating_is_estimated: Boolean(
+      isPlayerRowForTargetSeason && playerRow?.rating_is_estimated,
+    ),
     class_type: primaryClassType !== null ? Number(primaryClassType) : null,
     skill_branch_type:
       primarySkillBranchType !== null ? Number(primarySkillBranchType) : null,
@@ -1684,6 +1733,7 @@ async function getRanking({ region, season, classType, headers } = {}) {
           user_nickname,
           current_ranking,
           rank_rating,
+          rating_is_estimated,
           rating_achieved_record_no,
           class_type,
           skill_branch_type,
@@ -1721,6 +1771,7 @@ async function getRanking({ region, season, classType, headers } = {}) {
           dr.user_nickname,
           dr.current_ranking,
           dr.rank_rating,
+          dr.rating_is_estimated,
           dr.rating_achieved_record_no,
           COALESCE(mp_top.class_type, dr.class_type)::smallint AS class_type,
           COALESCE(mp_top.skill_branch_type, dr.skill_branch_type)::smallint AS skill_branch_type,
@@ -1748,6 +1799,13 @@ async function getRanking({ region, season, classType, headers } = {}) {
             AND (
               (dr.user_no IS NOT NULL AND mp.user_no = dr.user_no)
               OR ((dr.user_no IS NULL OR mp.user_no IS NULL) AND LOWER(mp.user_nickname) = LOWER(dr.user_nickname))
+            )
+            AND NOT EXISTS (
+              SELECT 1
+              FROM solare_match_mode_proofs smp
+              WHERE smp.region = mp.region
+                AND smp.record_no = mp.record_no
+                AND smp.mode = 'practice'
             )
           GROUP BY
             mp.class_type,
@@ -1777,6 +1835,7 @@ async function getRanking({ region, season, classType, headers } = {}) {
             ELSE current_ranking
           END AS effective_ranking,
           rank_rating,
+          rating_is_estimated,
           rating_achieved_record_no,
           ROW_NUMBER() OVER (
             PARTITION BY class_type
@@ -1804,6 +1863,7 @@ async function getRanking({ region, season, classType, headers } = {}) {
           effective_ranking,
           class_ranking,
           rank_rating,
+          rating_is_estimated,
           rating_achieved_record_no,
           class_type,
           skill_branch_type,
@@ -1830,6 +1890,7 @@ async function getRanking({ region, season, classType, headers } = {}) {
         tr.effective_ranking,
         tr.class_ranking,
         tr.rank_rating,
+        tr.rating_is_estimated,
         tr.rating_achieved_record_no,
         tr.class_type,
         tr.skill_branch_type,
@@ -1854,6 +1915,13 @@ async function getRanking({ region, season, classType, headers } = {}) {
             AND (
               (tr.user_no IS NOT NULL AND mp.user_no = tr.user_no)
               OR ((tr.user_no IS NULL OR mp.user_no IS NULL) AND LOWER(mp.user_nickname) = LOWER(tr.user_nickname))
+            )
+            AND NOT EXISTS (
+              SELECT 1
+              FROM solare_match_mode_proofs smp
+              WHERE smp.region = mp.region
+                AND smp.record_no = mp.record_no
+                AND smp.mode = 'practice'
             )
           ORDER BY
             mp.record_no DESC
@@ -1897,6 +1965,7 @@ async function getRanking({ region, season, classType, headers } = {}) {
         p.rank_rating !== null && p.rank_rating !== undefined
           ? Number(p.rank_rating)
           : null,
+      rating_is_estimated: Boolean(p.rating_is_estimated),
       rating_achieved_record_no:
         p.rating_achieved_record_no !== null &&
         p.rating_achieved_record_no !== undefined
@@ -1993,6 +2062,13 @@ async function applyInactivityDecay({ region, season, now } = {}) {
                 (sp.user_no IS NOT NULL AND mp.user_no = sp.user_no)
                 OR ((sp.user_no IS NULL OR mp.user_no IS NULL) AND LOWER(mp.user_nickname) = LOWER(sp.user_nickname))
               )
+              AND NOT EXISTS (
+                SELECT 1
+                FROM solare_match_mode_proofs smp
+                WHERE smp.region = mp.region
+                  AND smp.record_no = mp.record_no
+                  AND smp.mode = 'practice'
+              )
           ),
           sp.rating_achieved_at,
           sp.last_seen_at
@@ -2001,6 +2077,7 @@ async function applyInactivityDecay({ region, season, now } = {}) {
         solare_players sp
       WHERE
         sp.rank_rating IS NOT NULL
+        AND NOT COALESCE(sp.rating_is_estimated, FALSE)
         AND sp.rank_rating >= 1801
         AND ($1::varchar IS NULL OR sp.region = $1::varchar)
         AND ($2::smallint IS NULL OR sp.season = $2::smallint OR ($2::smallint = 9 AND sp.season IS NULL))
@@ -2164,6 +2241,8 @@ async function reconcileRegionRatings({
             user_no,
             user_nickname,
             rank_rating,
+            rating_is_estimated,
+            rating_anchor_record_no,
             COALESCE(
               (
                 SELECT MAX(mp.record_no)
@@ -2173,6 +2252,13 @@ async function reconcileRegionRatings({
                   AND (
                     (solare_players.user_no IS NOT NULL AND mp.user_no = solare_players.user_no)
                     OR ((solare_players.user_no IS NULL OR mp.user_no IS NULL) AND LOWER(mp.user_nickname) = LOWER(solare_players.user_nickname))
+                  )
+                  AND NOT EXISTS (
+                    SELECT 1
+                    FROM solare_match_mode_proofs smp
+                    WHERE smp.region = mp.region
+                      AND smp.record_no = mp.record_no
+                      AND smp.mode = 'practice'
                   )
               ),
               0
@@ -2205,7 +2291,11 @@ async function reconcileRegionRatings({
           ? Number(row.rank_rating)
           : null;
 
-      if (ratingBefore === targetRating) {
+      if (
+        ratingBefore === targetRating &&
+        !row.rating_is_estimated &&
+        row.rating_anchor_record_no !== null
+      ) {
         continue;
       }
 
@@ -2224,6 +2314,7 @@ async function reconcileRegionRatings({
             UPDATE solare_players
             SET
               rank_rating = $3,
+              rating_is_estimated = FALSE,
               rating_anchor_record_no = $4,
               rating_achieved_record_no = $4,
               rating_achieved_at = timezone('utc', now()),
@@ -2268,28 +2359,75 @@ async function reconcileRegionRatings({
     }
   }
 
-  // Attempt seedless bracket inference for any unseeded ranked players in the region
-  const unseededResult = await database.query({
-    text: `
-      SELECT
-        COUNT(*) FILTER (
-          WHERE fn_infer_unseeded_solare_player_rating(region, user_no, user_nickname)
-        )::int AS inferred_count
-      FROM solare_players
-      WHERE region = $1
-        AND rank_rating IS NULL
-        AND current_ranking IS NOT NULL
-        AND current_ranking >= 1
-        AND (season = $2 OR ($2 = 9 AND season IS NULL))
-      ;`,
-    values: [targetRegion, targetSeason],
+  const runUnseededInferencePass = async () => {
+    const passResult = await database.query({
+      text: `
+        SELECT
+          ARRAY_AGG(
+            COALESCE(ordered.user_no::text, LOWER(ordered.user_nickname))
+          ) FILTER (
+            WHERE fn_infer_unseeded_solare_player_rating(
+              ordered.region,
+              ordered.user_no,
+              ordered.user_nickname
+            )
+          ) AS inferred_keys
+        FROM (
+          SELECT
+            region,
+            user_no,
+            user_nickname
+          FROM solare_players
+          WHERE region = $1
+            AND rating_anchor_record_no IS NULL
+            AND current_ranking IS NOT NULL
+            AND current_ranking >= 1
+            AND (season = $2 OR ($2 = 9 AND season IS NULL))
+            AND (
+              rank_rating IS NULL
+              OR rating_is_estimated = TRUE
+              OR EXISTS (
+                SELECT 1
+                FROM solare_player_rating_events e
+                WHERE e.region = solare_players.region
+                  AND e.user_no = solare_players.user_no
+                  AND e.event_type = 'inferred_start'
+              )
+            )
+          ORDER BY
+            current_ranking ASC,
+            updated_at DESC
+        ) ordered
+        ;`,
+      values: [targetRegion, targetSeason],
+    });
+
+    return passResult.rows[0]?.inferred_keys || [];
+  };
+
+  // 1. Infer clean unseeded players first to tighten neighbor brackets
+  const inferredSet = new Set(await runUnseededInferencePass());
+
+  // 2. Prove Ranked vs Practice matches mathematically across the entire region
+  const proofStats = await proveRegionMatchModes({
+    region: targetRegion,
+    season: targetSeason,
   });
-  const inferredCount = Number(unseededResult.rows[0]?.inferred_count || 0);
+
+  // 3. Re-infer unseeded/estimated players using newly proven Practice exclusions & neighbor bounds
+  for (const key of await runUnseededInferencePass()) {
+    inferredSet.add(key);
+  }
+  for (const key of await runUnseededInferencePass()) {
+    inferredSet.add(key);
+  }
+
+  const inferredCount = inferredSet.size;
   reconciledCount += inferredCount;
 
   const leaderboardResult = await database.query({
     text: `
-      SELECT
+      SELECT DISTINCT ON (current_ranking)
         region,
         user_no,
         user_nickname,
@@ -2305,7 +2443,9 @@ async function reconcileRegionRatings({
         AND rank_rating IS NOT NULL
         AND (season = $2 OR ($2 = 9 AND season IS NULL))
       ORDER BY
-        current_ranking ASC
+        current_ranking ASC,
+        last_seen_at DESC NULLS LAST,
+        updated_at DESC NULLS LAST
       ;`,
     values: [targetRegion, targetSeason],
   });
@@ -2331,6 +2471,7 @@ async function reconcileRegionRatings({
               UPDATE solare_players
               SET
                 rank_rating = $3,
+                rating_is_estimated = FALSE,
                 updated_at = timezone('utc', now())
               WHERE region = $1 AND user_no = $2
               RETURNING region, season, user_no, user_nickname, rating_achieved_record_no
@@ -2392,6 +2533,8 @@ async function reconcileRegionRatings({
     season: targetSeason,
     reconciledCount,
     inferredCount,
+    provenRanked: proofStats.provenRanked,
+    provenPractice: proofStats.provenPractice,
     discrepancies,
   };
 }
@@ -2434,6 +2577,7 @@ async function resetSeasonRatings({ region, fromSeason, toSeason } = {}) {
         SET
           season = $3::smallint,
           rank_rating = tp.rating_after,
+          rating_is_estimated = FALSE,
           rating_anchor_record_no = NULL,
           rating_achieved_record_no = NULL,
           rating_achieved_at = timezone('utc', now()),
@@ -2494,6 +2638,8 @@ const solare = {
   inferRegionFromHeaders,
   getWinStreakBonus,
   getSeasonResetStartingRating,
+  computeMatchModeProofs,
+  proveRegionMatchModes,
   applyInactivityDecay,
   reconcileRegionRatings,
   resetSeasonRatings,
