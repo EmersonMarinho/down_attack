@@ -14,8 +14,10 @@ import {
   computeMatchModeProofs,
   proveRegionMatchModes,
 } from "~~/server/utils/solareMatchModeProof.js";
+import { planMonotonicRatingReconciliation } from "~~/server/utils/solareRankingReconcile.js";
 
 const VALID_REGIONS = ["SA", "NA", "EU", "KR", "JP", "RU", "TR", "TW"];
+const SOLARE_SHARED_RANK_FLOOR = 999;
 
 const REGION_BY_COUNTRIES = {
   KR: ["KR"],
@@ -1398,17 +1400,14 @@ async function resolvePlayerRankingPositions({
       : null;
   let activeClassRanking = null;
 
-  if (
-    isPlayerRowForTargetSeason &&
-    (playerRow.current_ranking !== null || playerRow.rank_rating !== null)
-  ) {
+  if (isPlayerRowForTargetSeason && playerRow.current_ranking !== null) {
     const rankingPositionResult = await database.query({
       text: `
         WITH deduplicated_ranking AS (
           SELECT DISTINCT ON (
             CASE
-              WHEN rank_rating IS NOT NULL THEN 'u:' || COALESCE(user_no::text, LOWER(user_nickname))
-              ELSE 'r:' || current_ranking::text
+              WHEN current_ranking < ${SOLARE_SHARED_RANK_FLOOR} THEN 'r:' || current_ranking::text
+              ELSE 'u:' || COALESCE(user_no::text, LOWER(user_nickname))
             END
           )
             user_no,
@@ -1422,23 +1421,19 @@ async function resolvePlayerRankingPositions({
             solare_players
           WHERE
             region = $1
-            AND (
-              (current_ranking IS NOT NULL AND current_ranking >= 1)
-              OR rank_rating IS NOT NULL
-            )
+            AND current_ranking IS NOT NULL
+            AND current_ranking >= 1
             AND (
               season = $2
               OR ($2 = 9 AND season IS NULL)
             )
           ORDER BY
             CASE
-              WHEN rank_rating IS NOT NULL THEN 'u:' || COALESCE(user_no::text, LOWER(user_nickname))
-              ELSE 'r:' || current_ranking::text
+              WHEN current_ranking < ${SOLARE_SHARED_RANK_FLOOR} THEN 'r:' || current_ranking::text
+              ELSE 'u:' || COALESCE(user_no::text, LOWER(user_nickname))
             END ASC,
-            rank_rating DESC NULLS LAST,
-            rating_achieved_record_no ASC NULLS LAST,
-            updated_at DESC,
-            last_seen_at DESC,
+            COALESCE(last_seen_at, updated_at) DESC NULLS LAST,
+            updated_at DESC NULLS LAST,
             win_count DESC
         ),
         ranking_with_most_played_class AS (
@@ -1498,8 +1493,8 @@ async function resolvePlayerRankingPositions({
                   ORDER BY
                     CASE WHEN rank_rating IS NOT NULL THEN 0 ELSE 1 END ASC,
                     rank_rating DESC NULLS LAST,
-                    rating_achieved_record_no ASC NULLS LAST,
                     current_ranking ASC NULLS LAST,
+                    rating_achieved_record_no ASC NULLS LAST,
                     win_count DESC
                 )::int
               ELSE current_ranking
@@ -1510,8 +1505,8 @@ async function resolvePlayerRankingPositions({
               ORDER BY
                 CASE WHEN rank_rating IS NOT NULL THEN 0 ELSE 1 END ASC,
                 rank_rating DESC NULLS LAST,
-                rating_achieved_record_no ASC NULLS LAST,
                 current_ranking ASC NULLS LAST,
+                rating_achieved_record_no ASC NULLS LAST,
                 win_count DESC
             )::int AS class_ranking
           FROM
@@ -1544,6 +1539,9 @@ async function resolvePlayerRankingPositions({
         );
       }
       activeClassRanking = Number(rankingPositionResult.rows[0].class_ranking);
+    } else {
+      // Stale "ghost" row: a newer player now holds this official rank in GetRankList.
+      activeOfficialRanking = null;
     }
   }
 
@@ -2275,13 +2273,17 @@ async function getRanking({ region, season, classType, headers } = {}) {
       : 9;
   }
 
+  // PA's GetRankList assigns a unique `_ranking` (1..998) to each active player; only 999 is a shared
+  // floor bucket. The crawler never clears `current_ranking` for accounts that drop out of GetRankList
+  // (banned/deleted/fell off), so a stale "ghost" row can keep an official rank that a newer player
+  // now holds. Deduplicating by official rank (newest snapshot wins) drops those ghosts.
   const playersResult = await database.query({
     text: `
       WITH deduplicated_ranking AS (
         SELECT DISTINCT ON (
           CASE
-            WHEN rank_rating IS NOT NULL THEN 'u:' || COALESCE(user_no::text, LOWER(user_nickname))
-            ELSE 'r:' || current_ranking::text
+            WHEN current_ranking < ${SOLARE_SHARED_RANK_FLOOR} THEN 'r:' || current_ranking::text
+            ELSE 'u:' || COALESCE(user_no::text, LOWER(user_nickname))
           END
         )
           user_no,
@@ -2301,23 +2303,19 @@ async function getRanking({ region, season, classType, headers } = {}) {
           solare_players
         WHERE
           region = $1
-          AND (
-            (current_ranking IS NOT NULL AND current_ranking >= 1)
-            OR rank_rating IS NOT NULL
-          )
+          AND current_ranking IS NOT NULL
+          AND current_ranking >= 1
           AND (
             season = $2
             OR ($2 = 9 AND season IS NULL)
           )
         ORDER BY
           CASE
-            WHEN rank_rating IS NOT NULL THEN 'u:' || COALESCE(user_no::text, LOWER(user_nickname))
-            ELSE 'r:' || current_ranking::text
+            WHEN current_ranking < ${SOLARE_SHARED_RANK_FLOOR} THEN 'r:' || current_ranking::text
+            ELSE 'u:' || COALESCE(user_no::text, LOWER(user_nickname))
           END ASC,
-          rank_rating DESC NULLS LAST,
-          rating_achieved_record_no ASC NULLS LAST,
-          updated_at DESC,
-          last_seen_at DESC,
+          COALESCE(last_seen_at, updated_at) DESC NULLS LAST,
+          updated_at DESC NULLS LAST,
           win_count DESC
       ),
       ranking_with_most_played_class AS (
@@ -2383,8 +2381,8 @@ async function getRanking({ region, season, classType, headers } = {}) {
                 ORDER BY
                   CASE WHEN rank_rating IS NOT NULL THEN 0 ELSE 1 END ASC,
                   rank_rating DESC NULLS LAST,
-                  rating_achieved_record_no ASC NULLS LAST,
                   current_ranking ASC NULLS LAST,
+                  rating_achieved_record_no ASC NULLS LAST,
                   win_count DESC
               )::int
             ELSE current_ranking
@@ -2397,8 +2395,8 @@ async function getRanking({ region, season, classType, headers } = {}) {
             ORDER BY
               CASE WHEN rank_rating IS NOT NULL THEN 0 ELSE 1 END ASC,
               rank_rating DESC NULLS LAST,
-              rating_achieved_record_no ASC NULLS LAST,
               current_ranking ASC NULLS LAST,
+              rating_achieved_record_no ASC NULLS LAST,
               win_count DESC
           )::int AS class_ranking,
           class_type,
@@ -2434,8 +2432,8 @@ async function getRanking({ region, season, classType, headers } = {}) {
         ORDER BY
           effective_ranking ASC NULLS LAST,
           rank_rating DESC NULLS LAST,
-          rating_achieved_record_no ASC NULLS LAST,
-          current_ranking ASC NULLS LAST
+          current_ranking ASC NULLS LAST,
+          rating_achieved_record_no ASC NULLS LAST
         LIMIT 100
       )
       SELECT
@@ -2487,8 +2485,8 @@ async function getRanking({ region, season, classType, headers } = {}) {
       ORDER BY
         tr.effective_ranking ASC NULLS LAST,
         tr.rank_rating DESC NULLS LAST,
-        tr.rating_achieved_record_no ASC NULLS LAST,
-        tr.current_ranking ASC NULLS LAST
+        tr.current_ranking ASC NULLS LAST,
+        tr.rating_achieved_record_no ASC NULLS LAST
       ;`,
     values: [targetRegion, targetSeason, validatedClassType],
   });
@@ -2953,7 +2951,7 @@ async function reconcileRegionRatings({
                     FROM solare_player_rating_events ep
                     WHERE ep.region = solare_players.region
                       AND ep.user_no = solare_players.user_no
-                      AND ep.event_type IN ('season_reset', 'seed_anchor', 'reconcile')
+                      AND ep.event_type IN ('season_reset', 'seed_anchor', 'reconcile', 'decay')
                   ), 0)
               )
             )
@@ -2967,6 +2965,45 @@ async function reconcileRegionRatings({
 
     return passResult.rows[0]?.inferred_keys || [];
   };
+
+  if (autoClamp) {
+    // Clear stale "ghost" official ranks where a newer snapshot holds the same rank (< 999)
+    // before running unseeded neighbor inference.
+    await database.query({
+      text: `
+        WITH active_holders AS (
+          SELECT DISTINCT ON (current_ranking)
+            user_no,
+            user_nickname,
+            current_ranking
+          FROM solare_players
+          WHERE region = $1
+            AND current_ranking IS NOT NULL
+            AND current_ranking >= 1
+            AND current_ranking < ${SOLARE_SHARED_RANK_FLOOR}
+            AND (season = $2 OR ($2 = 9 AND season IS NULL))
+          ORDER BY
+            current_ranking ASC,
+            COALESCE(last_seen_at, updated_at) DESC NULLS LAST,
+            updated_at DESC NULLS LAST,
+            win_count DESC
+        )
+        UPDATE solare_players sp
+        SET
+          current_ranking = NULL,
+          updated_at = timezone('utc', now())
+        FROM active_holders ah
+        WHERE sp.region = $1
+          AND (sp.season = $2 OR ($2 = 9 AND sp.season IS NULL))
+          AND sp.current_ranking = ah.current_ranking
+          AND (
+            (sp.user_no IS NOT NULL AND ah.user_no IS NOT NULL AND sp.user_no <> ah.user_no)
+            OR ((sp.user_no IS NULL OR ah.user_no IS NULL) AND LOWER(sp.user_nickname) <> LOWER(ah.user_nickname))
+          )
+        ;`,
+      values: [targetRegion, targetSeason],
+    });
+  }
 
   // 1. Infer clean unseeded players first to tighten neighbor brackets
   const inferredSet = new Set(await runUnseededInferencePass());
@@ -2990,95 +3027,131 @@ async function reconcileRegionRatings({
 
   const leaderboardResult = await database.query({
     text: `
-      SELECT DISTINCT ON (current_ranking)
-        region,
-        user_no,
-        user_nickname,
-        current_ranking,
-        rank_rating,
-        rating_achieved_record_no
+      SELECT DISTINCT ON (sp.current_ranking)
+        sp.region,
+        sp.user_no,
+        sp.user_nickname,
+        sp.current_ranking,
+        sp.rank_rating,
+        sp.rating_achieved_record_no,
+        (
+          sp.last_seen_at IS NOT NULL
+          AND EXISTS (
+            SELECT 1
+            FROM solare_match_players mp_post
+            INNER JOIN solare_matches m_post
+              ON m_post.region = mp_post.region AND m_post.record_no = mp_post.record_no
+            LEFT JOIN solare_match_mode_proofs pr_post
+              ON pr_post.region = mp_post.region AND pr_post.record_no = mp_post.record_no
+            WHERE mp_post.region = sp.region
+              AND COALESCE(pr_post.mode, '') <> 'practice'
+              AND COALESCE(m_post.season, 9) = COALESCE(sp.season, $2)
+              AND (
+                (sp.user_no IS NOT NULL AND mp_post.user_no = sp.user_no)
+                OR ((sp.user_no IS NULL OR mp_post.user_no IS NULL) AND LOWER(mp_post.user_nickname) = LOWER(sp.user_nickname))
+              )
+              AND m_post.match_date IS NOT NULL
+              AND m_post.match_date > sp.last_seen_at + INTERVAL '10 seconds'
+          )
+        ) AS has_post_snapshot_match
       FROM
-        solare_players
+        solare_players sp
       WHERE
-        region = $1
-        AND current_ranking IS NOT NULL
-        AND current_ranking >= 1
-        AND rank_rating IS NOT NULL
-        AND (season = $2 OR ($2 = 9 AND season IS NULL))
+        sp.region = $1
+        AND sp.current_ranking IS NOT NULL
+        AND sp.current_ranking >= 1
+        AND (sp.season = $2 OR ($2 = 9 AND sp.season IS NULL))
       ORDER BY
-        current_ranking ASC,
-        last_seen_at DESC NULLS LAST,
-        updated_at DESC NULLS LAST
+        sp.current_ranking ASC,
+        COALESCE(sp.last_seen_at, sp.updated_at) DESC NULLS LAST,
+        sp.updated_at DESC NULLS LAST
       ;`,
     values: [targetRegion, targetSeason],
   });
 
   const discrepancies = [];
-  const rows = leaderboardResult.rows;
+  const rows = leaderboardResult.rows.filter(
+    (row) =>
+      row.rank_rating !== null &&
+      row.rank_rating !== undefined &&
+      !row.has_post_snapshot_match,
+  );
 
-  for (let i = 0; i < rows.length - 1; i += 1) {
-    const higherRanked = rows[i];
-    const lowerRanked = rows[i + 1];
-    const higherRating = Number(higherRanked.rank_rating);
-    const lowerRating = Number(lowerRanked.rank_rating);
+  if (autoClamp) {
+    const outliers = planMonotonicRatingReconciliation(rows);
+    for (const outlier of outliers) {
+      const targetRow = outlier.row;
+      const previousRating = Number(outlier.rating);
+      const clampedRating = Number(outlier.targetRating);
+      const delta = clampedRating - previousRating;
 
-    if (higherRating < lowerRating) {
-      if (autoClamp) {
-        const clampedRating = higherRating;
-        const delta = clampedRating - lowerRating;
-        rows[i + 1].rank_rating = clampedRating;
-
-        await database.query({
-          text: `
-            WITH updated_player AS (
-              UPDATE solare_players
-              SET
-                rank_rating = $3,
-                rating_is_estimated = FALSE,
-                updated_at = timezone('utc', now())
-              WHERE region = $1 AND user_no = $2
-              RETURNING region, season, user_no, user_nickname, rating_achieved_record_no
+      await database.query({
+        text: `
+          WITH updated_player AS (
+            UPDATE solare_players
+            SET
+              rank_rating = $3,
+              rating_is_estimated = FALSE,
+              updated_at = timezone('utc', now())
+            WHERE region = $1 AND user_no = $2
+            RETURNING region, season, user_no, user_nickname, rating_achieved_record_no
+          )
+          INSERT INTO solare_player_rating_events (
+            region,
+            season,
+            user_no,
+            user_nickname,
+            record_no,
+            event_type,
+            previous_rating,
+            rating_delta,
+            new_rating,
+            metadata
+          )
+          SELECT
+            up.region,
+            up.season,
+            up.user_no,
+            up.user_nickname,
+            up.rating_achieved_record_no,
+            'reconcile',
+            $4,
+            $5,
+            $3,
+            jsonb_build_object(
+              'reason', 'daily_ranking_clamp',
+              'current_ranking', $6::int,
+              'upper_rank', $7::int,
+              'upper_rating', $8::int,
+              'lower_rank', $9::int,
+              'lower_rating', $10::int
             )
-            INSERT INTO solare_player_rating_events (
-              region,
-              season,
-              user_no,
-              user_nickname,
-              record_no,
-              event_type,
-              previous_rating,
-              rating_delta,
-              new_rating,
-              metadata
-            )
-            SELECT
-              up.region,
-              up.season,
-              up.user_no,
-              up.user_nickname,
-              up.rating_achieved_record_no,
-              'reconcile',
-              $4,
-              $5,
-              $3,
-              jsonb_build_object(
-                'reason', 'daily_ranking_clamp',
-                'current_ranking', $6::int
-              )
-            FROM updated_player up
-            ;`,
-          values: [
-            lowerRanked.region,
-            lowerRanked.user_no,
-            clampedRating,
-            lowerRating,
-            delta,
-            Number(lowerRanked.current_ranking),
-          ],
-        });
+          FROM updated_player up
+          ;`,
+        values: [
+          targetRow.region,
+          targetRow.user_no,
+          clampedRating,
+          previousRating,
+          delta,
+          Number(targetRow.current_ranking),
+          outlier.upper ? Number(outlier.upper.current_ranking) : null,
+          outlier.upper ? Number(outlier.upper.rank_rating) : null,
+          outlier.lower ? Number(outlier.lower.current_ranking) : null,
+          outlier.lower ? Number(outlier.lower.rank_rating) : null,
+        ],
+      });
 
-        reconciledCount += 1;
-      } else {
+      reconciledCount += 1;
+    }
+  } else {
+    for (let i = 0; i < rows.length - 1; i += 1) {
+      const higherRanked = rows[i];
+      const lowerRanked = rows[i + 1];
+      const higherRating = Number(higherRanked.rank_rating);
+      const lowerRating = Number(lowerRanked.rank_rating);
+
+      if (higherRating < lowerRating) {
         discrepancies.push({
           higher_rank: Number(higherRanked.current_ranking),
           higher_nick: higherRanked.user_nickname,

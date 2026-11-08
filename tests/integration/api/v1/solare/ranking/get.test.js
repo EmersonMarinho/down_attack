@@ -182,5 +182,80 @@ describe("GET /api/v1/solare/ranking", () => {
       expect(naGeoBody.players).toHaveLength(1);
       expect(naGeoBody.players[0].user_nickname).toBe("AmericanHero");
     });
+
+    test("Deduplicates stale ghost rank holders even when rank_rating is populated and breaks rating ties by official current_ranking", async () => {
+      // Stale ghost holder of Rank #35 (AtorPago) from an earlier GetRankList crawl
+      await orchestrator.createSolarePlayer({
+        region: "EU",
+        season: 9,
+        user_no: 3001,
+        user_nickname: "GhostRank35",
+        current_ranking: 35,
+        rank_rating: 2100,
+        rating_achieved_record_no: 900001,
+        class_type: 1,
+        skill_branch_type: 1,
+        win_count: 40,
+        lose_count: 10,
+        draw_count: 0,
+      });
+
+      // Current holder of Rank #35 (Zeugx) seen more recently in GetRankList
+      await orchestrator.createSolarePlayer({
+        region: "EU",
+        season: 9,
+        user_no: 3002,
+        user_nickname: "CurrentRank35",
+        current_ranking: 35,
+        rank_rating: 2017,
+        rating_achieved_record_no: 950010,
+        class_type: 24,
+        skill_branch_type: 1,
+        win_count: 179,
+        lose_count: 164,
+        draw_count: 0,
+      });
+
+      // Rank #36 tied at 2017 rating but with an earlier rating_achieved_record_no:
+      // Official current_ranking (35 < 36) must take precedence over rating_achieved_record_no!
+      await orchestrator.createSolarePlayer({
+        region: "EU",
+        season: 9,
+        user_no: 3003,
+        user_nickname: "TiedRank36",
+        current_ranking: 36,
+        rank_rating: 2017,
+        rating_achieved_record_no: 900005,
+        class_type: 20,
+        skill_branch_type: 2,
+        win_count: 131,
+        lose_count: 106,
+        draw_count: 0,
+      });
+
+      const euRes = await fetch(
+        `${webserver.origin}/api/v1/solare/ranking?region=EU`,
+      );
+      expect(euRes.status).toBe(200);
+      const euBody = await euRes.json();
+
+      expect(euBody.players.map((p) => p.user_nickname)).toEqual([
+        "CurrentRank35",
+        "TiedRank36",
+      ]);
+      expect(euBody.players[0].rank).toBe(1);
+      expect(euBody.players[0].official_ranking).toBe(35);
+      expect(euBody.players[1].rank).toBe(2);
+      expect(euBody.players[1].official_ranking).toBe(36);
+
+      // Summary for the superseded ghost should report null active rankings
+      const ghostSummaryRes = await fetch(
+        `${webserver.origin}/api/v1/solare/player/summary?nick=GhostRank35&region=EU`,
+      );
+      expect(ghostSummaryRes.status).toBe(200);
+      const ghostSummary = await ghostSummaryRes.json();
+      expect(ghostSummary.current_ranking).toBeNull();
+      expect(ghostSummary.official_ranking).toBeNull();
+    });
   });
 });
