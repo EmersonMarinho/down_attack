@@ -201,7 +201,7 @@ describe("GET /api/v1/solare/overlay", () => {
 
       expect(overlayWithTokenResponse.status).toBe(200);
       expect(overlayWithTokenResponse.headers.get("cache-control")).toBe(
-        "public, max-age=0, s-maxage=10, stale-while-revalidate=10",
+        "private, no-store, max-age=0",
       );
 
       const overlayWithTokenBody = await overlayWithTokenResponse.json();
@@ -427,22 +427,57 @@ describe("GET /api/v1/solare/overlay", () => {
         25, -20, 33, 30, 30,
       ]);
       const fullStreakEtag = fullStreakResponse.headers.get("etag");
-      expect(fullStreakEtag).toBe('W/"930010:930000:930000:1500"');
+      expect(fullStreakEtag).toBe(
+        'W/"930010:11:11:212:72:60:0:n:65:26:1:930000:930000:1500"',
+      );
 
-      // Polling with matching since returns 304 Not Modified with empty body
+      // Polling a session with matching since + session ETag (header) returns 304 Not Modified
       const notModifiedBySince = await fetch(
         `${webserver.origin}/api/v1/solare/overlay?token=${createdSession.token}&since=930010`,
+        { headers: { "If-None-Match": fullStreakEtag } },
       );
       expect(notModifiedBySince.status).toBe(304);
       expect(notModifiedBySince.headers.get("etag")).toBe(fullStreakEtag);
+      expect(notModifiedBySince.headers.get("cache-control")).toBe(
+        "private, no-store, max-age=0",
+      );
       expect(await notModifiedBySince.text()).toBe("");
 
-      // Polling by nick+region with since_record_no also returns 304 Not Modified
+      // The session ETag mirrored in the `etag` query param (CDN strips If-None-Match) also returns 304
+      const notModifiedByEtagParam = await fetch(
+        `${webserver.origin}/api/v1/solare/overlay?token=${createdSession.token}&since=930010&etag=${encodeURIComponent(fullStreakEtag)}`,
+      );
+      expect(notModifiedByEtagParam.status).toBe(304);
+      expect(await notModifiedByEtagParam.text()).toBe("");
+
+      // Legacy 4-part ETag from older overlay clients self-heals with 200 OK instead of freezing on 304
+      const legacyFourPartEtagResponse = await fetch(
+        `${webserver.origin}/api/v1/solare/overlay?token=${createdSession.token}&since=930010`,
+        { headers: { "If-None-Match": 'W/"930010:930000:930000:1500"' } },
+      );
+      expect(legacyFourPartEtagResponse.status).toBe(200);
+      expect(legacyFourPartEtagResponse.headers.get("etag")).toBe(
+        fullStreakEtag,
+      );
+
+      // A session poll without the session fingerprint can't prove freshness and returns 200 OK
+      const sessionWithoutFingerprint = await fetch(
+        `${webserver.origin}/api/v1/solare/overlay?token=${createdSession.token}&since=930010`,
+      );
+      expect(sessionWithoutFingerprint.status).toBe(200);
+      const sessionWithoutFingerprintBody =
+        await sessionWithoutFingerprint.json();
+      expect(sessionWithoutFingerprintBody.latest_record_no).toBe(930010);
+      expect(sessionWithoutFingerprintBody.rating).toBe(1732);
+
+      // Polling by nick+region with since_record_no returns 304 Not Modified
       const notModifiedByNick = await fetch(
         `${webserver.origin}/api/v1/solare/overlay?nick=Okazaki&region=SA&since_record_no=930010`,
       );
       expect(notModifiedByNick.status).toBe(304);
-      expect(notModifiedByNick.headers.get("etag")).toBe('W/"930010"');
+      expect(notModifiedByNick.headers.get("etag")).toBe(
+        'W/"930010:11:11:212:72:60:0:n:65:26:1"',
+      );
       expect(await notModifiedByNick.text()).toBe("");
 
       // Polling with older since returns 200 OK with full payload
@@ -484,7 +519,16 @@ describe("GET /api/v1/solare/overlay", () => {
       expect(afterResetBody.session.total_games).toBe(0);
 
       const newSessionEtag = afterResetWithOldEtag.headers.get("etag");
-      expect(newSessionEtag).toBe('W/"930010:930010:930010:1750"');
+      expect(newSessionEtag).toBe(
+        'W/"930010:11:11:212:72:60:0:n:65:26:1:930010:930010:1750"',
+      );
+
+      // The old session fingerprint mirrored in the query param is also rejected after reset
+      const afterResetOldEtagParam = await fetch(
+        `${webserver.origin}/api/v1/solare/overlay?token=${createdSession.token}&since=930010&etag=${encodeURIComponent(fullStreakEtag)}`,
+      );
+      expect(afterResetOldEtagParam.status).toBe(200);
+      expect((await afterResetOldEtagParam.json()).rating).toBe(1750);
 
       // Subsequent poll with the updated session ETag returns 304 Not Modified
       const afterResetNotModified = await fetch(
@@ -496,6 +540,161 @@ describe("GET /api/v1/solare/overlay", () => {
         },
       );
       expect(afterResetNotModified.status).toBe(304);
+
+      // --- Two-stage crawler ingestion regression test ---
+      // Stage 1: Another participant in match 930011 is crawled first, inserting
+      // Okazaki's participant row with is_winner=true and vary_rank_rating=null,
+      // while solare_players still holds the previous W/L (72W 60L).
+      await orchestrator.createSolareMatch({
+        record_no: 930011,
+        user_nickname: "Okazaki",
+        user_no: 777001,
+        is_winner: true,
+        vary_rank_rating: null,
+      });
+
+      const stage1Poll = await fetch(
+        `${webserver.origin}/api/v1/solare/overlay?token=${createdSession.token}&since=930010&etag=${encodeURIComponent(newSessionEtag)}`,
+        { headers: { "If-None-Match": newSessionEtag } },
+      );
+      expect(stage1Poll.status).toBe(200);
+      const stage1Etag = stage1Poll.headers.get("etag");
+      const stage1Body = await stage1Poll.json();
+
+      // During Stage 1, TODAY RECORD must NOT prematurely jump to 1W-0L while
+      // rating/net_pdl/overall are still awaiting Stage 2.
+      expect(stage1Body.latest_record_no).toBe(930011);
+      expect(stage1Body.rating).toBe(1750);
+      expect(stage1Body.overall.wins).toBe(72);
+      expect(stage1Body.overall.losses).toBe(60);
+      expect(stage1Body.session.wins).toBe(0);
+      expect(stage1Body.session.losses).toBe(0);
+      expect(stage1Body.session.net_pdl).toBe(0);
+      expect(stage1Body.session.recent_deltas).toEqual([]);
+
+      // Bare nick+since poll without ETag also refuses 304 while latest match is half-crawled
+      const stage1BareNickPoll = await fetch(
+        `${webserver.origin}/api/v1/solare/overlay?nick=Okazaki&region=SA&since=930011`,
+      );
+      expect(stage1BareNickPoll.status).toBe(200);
+
+      // Stage 2: Seconds later, the crawler visits Okazaki directly, populating
+      // vary_rank_rating=+21 on match 930011 and updating solare_players W/L & rating.
+      await orchestrator.createSolareMatch({
+        record_no: 930011,
+        user_nickname: "Okazaki",
+        user_no: 777001,
+        is_winner: true,
+        vary_rank_rating: 21,
+      });
+      await orchestrator.createSolarePlayer({
+        region: "SA",
+        user_no: 777001,
+        user_nickname: "Okazaki",
+        current_ranking: 65,
+        class_type: 26,
+        skill_branch_type: 1,
+        win_count: 73,
+        lose_count: 60,
+        draw_count: 0,
+        win_average: "54.89%",
+        rank_rating: 1771,
+      });
+
+      // Polling at the SAME since=930011 with Stage 1's ETag MUST return 200 OK (NOT 304!)
+      const stage2Poll = await fetch(
+        `${webserver.origin}/api/v1/solare/overlay?token=${createdSession.token}&since=930011&etag=${encodeURIComponent(stage1Etag)}`,
+        { headers: { "If-None-Match": stage1Etag } },
+      );
+      expect(stage2Poll.status).toBe(200);
+      const stage2Etag = stage2Poll.headers.get("etag");
+      expect(stage2Etag).not.toBe(stage1Etag);
+      const stage2Body = await stage2Poll.json();
+
+      expect(stage2Body.latest_record_no).toBe(930011);
+      expect(stage2Body.rating).toBe(1771);
+      expect(stage2Body.overall).toEqual({
+        wins: 73,
+        losses: 60,
+        draws: 0,
+        total_games: 133,
+        winrate: 54.9,
+      });
+      expect(stage2Body.session).toEqual({
+        anchor_rating: 1750,
+        anchor_record_no: 930010,
+        session_start_record_no: 930010,
+        wins: 1,
+        losses: 0,
+        draws: 0,
+        total_games: 1,
+        winrate: 100,
+        net_pdl: 21,
+        recent_deltas: [21],
+      });
+
+      // Once the client holds Stage 2's ETag, subsequent polls cleanly return 304 Not Modified
+      const stage2SteadyPoll = await fetch(
+        `${webserver.origin}/api/v1/solare/overlay?token=${createdSession.token}&since=930011&etag=${encodeURIComponent(stage2Etag)}`,
+        { headers: { "If-None-Match": stage2Etag } },
+      );
+      expect(stage2SteadyPoll.status).toBe(304);
+
+      // --- Borderline Top-100 dropout (ranking_superseded) regression test ---
+      // Match 930012 (loss, vary_rank_rating=null) arrives via another Top-100
+      // participant while Okazaki (#65) has not yet been superseded.
+      await orchestrator.createSolareMatch({
+        record_no: 930012,
+        user_nickname: "Okazaki",
+        user_no: 777001,
+        is_winner: false,
+        vary_rank_rating: null,
+      });
+
+      const preSupersededPoll = await fetch(
+        `${webserver.origin}/api/v1/solare/overlay?token=${createdSession.token}&since=930011&etag=${encodeURIComponent(stage2Etag)}`,
+        { headers: { "If-None-Match": stage2Etag } },
+      );
+      expect(preSupersededPoll.status).toBe(200);
+      const preSupersededEtag = preSupersededPoll.headers.get("etag");
+      const preSupersededBody = await preSupersededPoll.json();
+      expect(preSupersededBody.session.wins).toBe(1);
+      expect(preSupersededBody.session.losses).toBe(0);
+
+      // Another player now claims #65 with a newer last_seen_at (Okazaki dropped
+      // out of Top 100, so vary_rank_rating on 930012 will remain null).
+      await orchestrator.createSolarePlayer({
+        region: "SA",
+        user_no: 777002,
+        user_nickname: "NewRank65Holder",
+        current_ranking: 65,
+        class_type: 12,
+        skill_branch_type: 1,
+        win_count: 80,
+        lose_count: 50,
+        draw_count: 0,
+        win_average: "61.54%",
+        rank_rating: 1780,
+      });
+
+      // Polling at the SAME since=930012 with preSupersededEtag MUST return 200 OK
+      // because ranking_superseded flipped false -> true, counting the loss in session!
+      const postSupersededPoll = await fetch(
+        `${webserver.origin}/api/v1/solare/overlay?token=${createdSession.token}&since=930012&etag=${encodeURIComponent(preSupersededEtag)}`,
+        { headers: { "If-None-Match": preSupersededEtag } },
+      );
+      expect(postSupersededPoll.status).toBe(200);
+      const postSupersededEtag = postSupersededPoll.headers.get("etag");
+      expect(postSupersededEtag).not.toBe(preSupersededEtag);
+      const postSupersededBody = await postSupersededPoll.json();
+      expect(postSupersededBody.session.wins).toBe(1);
+      expect(postSupersededBody.session.losses).toBe(1);
+
+      const postSupersededSteadyPoll = await fetch(
+        `${webserver.origin}/api/v1/solare/overlay?token=${createdSession.token}&since=930012&etag=${encodeURIComponent(postSupersededEtag)}`,
+        { headers: { "If-None-Match": postSupersededEtag } },
+      );
+      expect(postSupersededSteadyPoll.status).toBe(304);
     });
   });
 });

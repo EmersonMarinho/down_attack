@@ -432,7 +432,7 @@ function parseRecordNoFromEtag(etag) {
     return null;
   }
 
-  const match = etag.trim().match(/^(?:W\/)?"(\d+)(?::\d+:\d+:-?\d+)?"$/);
+  const match = etag.trim().match(/^(?:W\/)?"(\d+)(?::[^"]*)?"$/);
   if (!match) {
     return null;
   }
@@ -441,11 +441,45 @@ function parseRecordNoFromEtag(etag) {
   return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : null;
 }
 
-function buildOverlayEtag({ latestRecordNo, sessionRow }) {
+function buildOverlayEtag({
+  latestRecordNo,
+  totalMatches = 0,
+  ratedMatches = 0,
+  sumVaryRating = 0,
+  playerRow = null,
+  sessionRow = null,
+}) {
+  const playerSegment = playerRow
+    ? [
+        Number(playerRow.win_count || 0),
+        Number(playerRow.lose_count || 0),
+        Number(playerRow.draw_count || 0),
+        playerRow.rank_rating !== null && playerRow.rank_rating !== undefined
+          ? Number(playerRow.rank_rating)
+          : "n",
+        playerRow.current_ranking !== null &&
+        playerRow.current_ranking !== undefined
+          ? playerRow.ranking_superseded
+            ? `s${Number(playerRow.current_ranking)}`
+            : Number(playerRow.current_ranking)
+          : "n",
+        playerRow.class_type !== null && playerRow.class_type !== undefined
+          ? Number(playerRow.class_type)
+          : "n",
+        playerRow.skill_branch_type !== null &&
+        playerRow.skill_branch_type !== undefined
+          ? Number(playerRow.skill_branch_type)
+          : "n",
+      ].join(":")
+    : "np";
+
+  const base = `${latestRecordNo}:${totalMatches}:${ratedMatches}:${sumVaryRating}:${playerSegment}`;
+
   if (sessionRow) {
-    return `W/"${latestRecordNo}:${Number(sessionRow.anchor_record_no)}:${Number(sessionRow.session_start_record_no)}:${Number(sessionRow.anchor_rating)}"`;
+    return `W/"${base}:${Number(sessionRow.anchor_record_no)}:${Number(sessionRow.session_start_record_no)}:${Number(sessionRow.anchor_rating)}"`;
   }
-  return `W/"${latestRecordNo}"`;
+
+  return `W/"${base}"`;
 }
 
 async function findPlayerIdentityAndWatermark(
@@ -798,17 +832,34 @@ async function getOverlayData({
   const playerResult = await database.query({
     text: `
       SELECT
-        *
+        sp.*,
+        (
+          EXISTS (
+            SELECT 1
+            FROM solare_players sp2
+            WHERE sp2.region = sp.region
+              AND sp2.current_ranking = sp.current_ranking
+              AND COALESCE(sp2.season, 9) = COALESCE(sp.season, 9)
+              AND sp2.user_no IS DISTINCT FROM sp.user_no
+              AND COALESCE(sp2.last_seen_at, sp2.updated_at) > COALESCE(sp.last_seen_at, sp.updated_at)
+          )
+          OR EXISTS (
+            SELECT 1
+            FROM solare_players sp3
+            WHERE sp3.region = sp.region
+              AND COALESCE(sp3.season, 9) > COALESCE(sp.season, 9)
+          )
+        ) AS ranking_superseded
       FROM
-        solare_players
+        solare_players sp
       WHERE
-        region = $1
+        sp.region = $1
         AND (
-          ($3::bigint IS NOT NULL AND user_no = $3::bigint)
-          OR LOWER(user_nickname) = LOWER($2)
+          ($3::bigint IS NOT NULL AND sp.user_no = $3::bigint)
+          OR LOWER(sp.user_nickname) = LOWER($2)
         )
       ORDER BY
-        updated_at DESC
+        sp.updated_at DESC
       LIMIT 1
       ;`,
     values: [targetRegion, targetNick, targetUserNo],
@@ -816,13 +867,23 @@ async function getOverlayData({
 
   const playerRow = playerResult.rows[0] || null;
   const resolvedUserNo = playerRow?.user_no || targetUserNo || null;
+  const isActiveTop100Player =
+    playerRow !== null &&
+    playerRow.current_ranking !== null &&
+    playerRow.current_ranking !== undefined &&
+    Number(playerRow.current_ranking) >= 1 &&
+    Number(playerRow.current_ranking) <= 100 &&
+    !playerRow.ranking_superseded;
 
   if (targetSinceRecordNo !== null) {
     const latestRecordResult = await database.query({
       text: `
         SELECT
           COUNT(*)::int AS total_matches,
-          MAX(mp.record_no) AS max_record_no
+          COUNT(mp.vary_rank_rating)::int AS rated_matches,
+          COALESCE(SUM(mp.vary_rank_rating), 0)::int AS sum_vary_rating,
+          MAX(mp.record_no) AS max_record_no,
+          (ARRAY_AGG(mp.vary_rank_rating ORDER BY mp.record_no DESC))[1] AS latest_vary_rank_rating
         FROM
           solare_match_players mp
         WHERE
@@ -845,9 +906,17 @@ async function getOverlayData({
     const totalMatchesCount = Number(
       latestRecordResult.rows[0]?.total_matches || 0,
     );
+    const ratedMatchesCount = Number(
+      latestRecordResult.rows[0]?.rated_matches || 0,
+    );
+    const sumVaryRatingCount = Number(
+      latestRecordResult.rows[0]?.sum_vary_rating || 0,
+    );
     const currentLatestRecordNo = latestRecordResult.rows[0]?.max_record_no
       ? Number(latestRecordResult.rows[0].max_record_no)
       : 0;
+    const latestVaryRankRating =
+      latestRecordResult.rows[0]?.latest_vary_rank_rating ?? null;
 
     if (!playerRow && totalMatchesCount === 0) {
       throw new NotFoundError({
@@ -858,15 +927,25 @@ async function getOverlayData({
 
     const currentEtag = buildOverlayEtag({
       latestRecordNo: currentLatestRecordNo,
+      totalMatches: totalMatchesCount,
+      ratedMatches: ratedMatchesCount,
+      sumVaryRating: sumVaryRatingCount,
+      playerRow,
       sessionRow,
     });
     const trimmedIfNoneMatch =
       typeof ifNoneMatch === "string" ? ifNoneMatch.trim() : "";
-    const etagMatches =
-      trimmedIfNoneMatch.length === 0 ||
-      trimmedIfNoneMatch === currentEtag ||
-      trimmedIfNoneMatch === `"${currentLatestRecordNo}"` ||
-      trimmedIfNoneMatch === `W/"${currentLatestRecordNo}"`;
+    // The ETag captures match count, rated-match count/sum, player W/L/rating,
+    // and session anchor/start/rating so two-stage crawler updates (where
+    // vary_rank_rating and solare_players arrive after record_no is first
+    // inserted via another participant) invalidate 304 immediately.
+    const etagMatches = sessionRow
+      ? trimmedIfNoneMatch === currentEtag
+      : trimmedIfNoneMatch.length > 0
+        ? trimmedIfNoneMatch === currentEtag
+        : !isActiveTop100Player ||
+          totalMatchesCount === 0 ||
+          latestVaryRankRating !== null;
 
     if (currentLatestRecordNo === targetSinceRecordNo && etagMatches) {
       return {
@@ -933,6 +1012,8 @@ async function getOverlayData({
   let latestUserNo = null;
   let matchWins = 0;
   let matchLosses = 0;
+  let ratedMatches = 0;
+  let sumVaryRating = 0;
   let sumKills = 0;
   let sumDeaths = 0;
   let sumCc = 0;
@@ -949,6 +1030,10 @@ async function getOverlayData({
       matchWins += 1;
     } else if (row.is_winner === false) {
       matchLosses += 1;
+    }
+    if (row.vary_rank_rating !== null && row.vary_rank_rating !== undefined) {
+      ratedMatches += 1;
+      sumVaryRating += Number(row.vary_rank_rating);
     }
     sumKills += Number(row.kill_count || 0);
     sumDeaths += Number(row.death_count || 0);
@@ -996,8 +1081,16 @@ async function getOverlayData({
 
     rating = Math.max(0, Number(sessionRow.anchor_rating) + anchorDeltaSum);
 
+    // Active Top-100 players receive vary_rank_rating on every ranked match once
+    // their own match list is crawled; rows with effective_delta === null are
+    // either half-crawled (discovered via another participant first) or practice
+    // matches, and must not tick TODAY RECORD ahead of rating/net_pdl.
     const sessionRowsDesc = enrichedMatches
-      .filter((m) => m.record_no > sessionStartRecordNo)
+      .filter(
+        (m) =>
+          m.record_no > sessionStartRecordNo &&
+          (!isActiveTop100Player || m.effective_delta !== null),
+      )
       .reverse();
 
     const sessionWins = sessionRowsDesc.filter(
@@ -1051,11 +1144,24 @@ async function getOverlayData({
       }
     : null;
 
-  return {
+  const responseEtag = buildOverlayEtag({
+    latestRecordNo,
+    totalMatches,
+    ratedMatches,
+    sumVaryRating,
+    playerRow,
+    sessionRow,
+  });
+
+  const resultPayload = {
     region: targetRegion,
     user_nickname: canonicalNick,
     user_no: canonicalUserNo ? String(canonicalUserNo) : null,
-    current_ranking: playerRow ? Number(playerRow.current_ranking) : null,
+    current_ranking:
+      playerRow?.current_ranking !== null &&
+      playerRow?.current_ranking !== undefined
+        ? Number(playerRow.current_ranking)
+        : null,
     class_type: classType !== null ? Number(classType) : null,
     skill_branch_type:
       skillBranchType !== null ? Number(skillBranchType) : null,
@@ -1079,6 +1185,13 @@ async function getOverlayData({
     },
     session: sessionStats,
   };
+
+  Object.defineProperty(resultPayload, "etag", {
+    value: responseEtag,
+    enumerable: false,
+  });
+
+  return resultPayload;
 }
 
 async function getChatSummary({ nick, region, token } = {}) {
