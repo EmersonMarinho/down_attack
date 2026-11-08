@@ -298,7 +298,9 @@
                             :title="`Performance score: ${activeLatestMatch.performance_score} (100 = match average)`"
                           >
                             {{
-                              activeLatestMatch.award === "mvp" ? "★ MVP" : "ACE"
+                              activeLatestMatch.award === "mvp"
+                                ? "★ MVP"
+                                : "ACE"
                             }}
                           </span>
                           <span
