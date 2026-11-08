@@ -1164,29 +1164,34 @@ useHead({
 
 // --- OBS Widget Mode State ---
 const overlayData = ref(null);
+const widgetEtag = ref(null);
 const errorMessage = ref("");
 let pollTimer = null;
+let isWidgetPolling = false;
+let lastWidgetTargetKey = "";
 
 const layoutMode = computed(() => {
   const raw = String(route.query.layout || "vertical").toLowerCase();
   return raw === "horizontal" ? "horizontal" : "vertical";
 });
 
-function buildOverlayEtag(data) {
-  if (
-    !data ||
-    data.latest_record_no === undefined ||
-    data.latest_record_no === null
-  ) {
-    return null;
+async function fetchOverlayPoll(params, etag) {
+  // `etag` is mirrored in the query because the CDN may strip If-None-Match,
+  // and `no-store` keeps the OBS/CEF browser cache from replaying stale bodies.
+  if (etag) {
+    params.set("etag", etag);
   }
-  if (data.session) {
-    return `W/"${data.latest_record_no}:${data.session.anchor_record_no}:${data.session.session_start_record_no}:${data.session.anchor_rating}"`;
-  }
-  return `W/"${data.latest_record_no}"`;
+  return await fetch(`/api/v1/solare/overlay?${params.toString()}`, {
+    cache: "no-store",
+    headers: etag ? { "If-None-Match": etag } : undefined,
+  });
 }
 
 async function fetchOverlayWidget() {
+  if (isWidgetPolling) {
+    return;
+  }
+
   const token = route.query.token ? String(route.query.token).trim() : "";
   const nick = route.query.nick ? String(route.query.nick).trim() : "";
   const region = route.query.region
@@ -1195,6 +1200,13 @@ async function fetchOverlayWidget() {
 
   if (!token && !nick) {
     return;
+  }
+
+  const targetKey = token ? `t:${token}` : `n:${region}:${nick.toLowerCase()}`;
+  if (targetKey !== lastWidgetTargetKey) {
+    lastWidgetTargetKey = targetKey;
+    widgetEtag.value = null;
+    overlayData.value = null;
   }
 
   const params = new URLSearchParams();
@@ -1206,21 +1218,22 @@ async function fetchOverlayWidget() {
   }
 
   if (
+    widgetEtag.value &&
     overlayData.value?.latest_record_no !== undefined &&
     overlayData.value?.latest_record_no !== null
   ) {
     params.set("since", String(overlayData.value.latest_record_no));
   }
 
-  const etag = buildOverlayEtag(overlayData.value);
-
+  isWidgetPolling = true;
   try {
-    const response = await fetch(
-      `/api/v1/solare/overlay?${params.toString()}`,
-      etag ? { headers: { "If-None-Match": etag } } : undefined,
-    );
+    const response = await fetchOverlayPoll(params, widgetEtag.value);
 
     if (response.status === 304) {
+      const nextEtag = response.headers.get("etag");
+      if (nextEtag) {
+        widgetEtag.value = nextEtag;
+      }
       errorMessage.value = "";
       return;
     }
@@ -1234,12 +1247,15 @@ async function fetchOverlayWidget() {
       return;
     }
 
+    widgetEtag.value = response.headers.get("etag") || null;
     overlayData.value = body;
     errorMessage.value = "";
   } catch {
     if (!overlayData.value) {
       errorMessage.value = "Connection error while loading overlay.";
     }
+  } finally {
+    isWidgetPolling = false;
   }
 }
 
@@ -1322,6 +1338,9 @@ const demoOverlayData = {
 };
 
 const livePlayerData = ref(null);
+const dashboardEtag = ref(null);
+let isDashboardSyncing = false;
+let dashboardStateEpoch = 0;
 
 const activePlayerData = computed(() => {
   return livePlayerData.value || demoOverlayData;
@@ -1560,6 +1579,7 @@ async function handleSearchPlayer() {
   if (!trimmedNick) return;
 
   isSearching.value = true;
+  dashboardStateEpoch += 1;
   searchStatus.value = "loading";
   searchErrorMessage.value = "";
 
@@ -1579,7 +1599,10 @@ async function handleSearchPlayer() {
       params.set("token", sessionToken.value);
     }
 
-    const response = await fetch(`/api/v1/solare/overlay?${params.toString()}`);
+    const response = await fetch(
+      `/api/v1/solare/overlay?${params.toString()}`,
+      { cache: "no-store" },
+    );
     const body = await response.json();
 
     if (!response.ok) {
@@ -1593,6 +1616,7 @@ async function handleSearchPlayer() {
       sessionToken.value = "";
     }
 
+    dashboardEtag.value = response.headers.get("etag") || null;
     livePlayerData.value = body;
     searchStatus.value = "found";
     previewRatingOverride.value = null;
@@ -1642,6 +1666,7 @@ async function handleStartOrResetSession() {
   }
 
   isSavingSession.value = true;
+  dashboardStateEpoch += 1;
   sessionButtonLabel.value = "RESETTING SESSION...";
   sessionFeedbackMessage.value = "";
   sessionFeedbackIsError.value = false;
@@ -1692,14 +1717,17 @@ async function handleStartOrResetSession() {
     }
 
     sessionToken.value = body.token;
+    dashboardEtag.value = null;
     startingRatingInput.value = Number(body.anchor_rating);
     previewRatingOverride.value = null;
     saveStateToStorage();
 
     const overlayRes = await fetch(
       `/api/v1/solare/overlay?token=${encodeURIComponent(body.token)}`,
+      { cache: "no-store" },
     );
     if (overlayRes.ok) {
+      dashboardEtag.value = overlayRes.headers.get("etag") || null;
       livePlayerData.value = await overlayRes.json();
       searchStatus.value = "found";
       syncSecondsAgo.value = 0;
@@ -1754,9 +1782,11 @@ async function copyChatCommand() {
 }
 
 async function syncDashboardOverlay() {
-  if (isSearching.value || isSavingSession.value) return;
+  if (isDashboardSyncing || isSearching.value || isSavingSession.value) return;
   if (!sessionToken.value && searchStatus.value !== "found") return;
 
+  const requestEpoch = dashboardStateEpoch;
+  isDashboardSyncing = true;
   try {
     const params = new URLSearchParams();
     if (sessionToken.value) {
@@ -1769,22 +1799,31 @@ async function syncDashboardOverlay() {
     }
 
     if (
+      dashboardEtag.value &&
       livePlayerData.value?.latest_record_no !== undefined &&
       livePlayerData.value?.latest_record_no !== null
     ) {
       params.set("since", String(livePlayerData.value.latest_record_no));
     }
 
-    const etag = buildOverlayEtag(livePlayerData.value);
-    const res = await fetch(
-      `/api/v1/solare/overlay?${params.toString()}`,
-      etag ? { headers: { "If-None-Match": etag } } : undefined,
-    );
+    const res = await fetchOverlayPoll(params, dashboardEtag.value);
+    if (requestEpoch !== dashboardStateEpoch) {
+      return;
+    }
     if (res.status === 304) {
+      const nextEtag = res.headers.get("etag");
+      if (nextEtag) {
+        dashboardEtag.value = nextEtag;
+      }
       return;
     }
     if (res.ok) {
+      const nextEtag = res.headers.get("etag") || null;
       const body = await res.json();
+      if (requestEpoch !== dashboardStateEpoch) {
+        return;
+      }
+      dashboardEtag.value = nextEtag;
       livePlayerData.value = body;
       if (body.rating !== null && body.rating !== undefined) {
         startingRatingInput.value = Number(body.rating);
@@ -1792,6 +1831,8 @@ async function syncDashboardOverlay() {
     }
   } catch {
     // Silent background sync error ignored
+  } finally {
+    isDashboardSyncing = false;
   }
 }
 
@@ -1832,8 +1873,10 @@ onMounted(async () => {
       sessionToken.value = saved.token;
       const res = await fetch(
         `/api/v1/solare/overlay?token=${encodeURIComponent(saved.token)}`,
+        { cache: "no-store" },
       );
       if (res.ok) {
+        dashboardEtag.value = res.headers.get("etag") || null;
         const body = await res.json();
         livePlayerData.value = body;
         searchStatus.value = "found";
@@ -1842,6 +1885,7 @@ onMounted(async () => {
         }
       } else if (res.status === 404) {
         sessionToken.value = "";
+        dashboardEtag.value = null;
         saveStateToStorage();
       }
     }
