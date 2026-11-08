@@ -1129,14 +1129,21 @@ const router = useRouter();
 
 const regions = ["SA", "NA", "EU", "KR", "JP", "RU", "TR", "TW"];
 
+function safeDecodeRouteParam(val) {
+  const raw = String(val || "");
+  try {
+    return decodeURIComponent(raw).trim();
+  } catch {
+    return raw.trim();
+  }
+}
+
 const routeRegion = computed(() =>
   String(route.params.region || "SA")
     .trim()
     .toUpperCase(),
 );
-const routeNick = computed(() =>
-  decodeURIComponent(String(route.params.nick || "")).trim(),
-);
+const routeNick = computed(() => safeDecodeRouteParam(route.params.nick));
 
 const searchRegion = ref(routeRegion.value);
 const searchQuery = ref(routeNick.value);
@@ -1158,13 +1165,200 @@ const resultFilter = ref("all"); // 'all' | 'win' | 'loss'
 const compactNumbers = ref(false);
 const openMatchMap = ref({});
 
+const requestUrl = useRequestURL();
+
+const { data: ssrSummary } = await useAsyncData(
+  () =>
+    `solare-player-summary:${routeRegion.value}:${routeNick.value.toLowerCase()}`,
+  async () => {
+    if (import.meta.client || !routeNick.value) return null;
+    try {
+      return await $fetch("/api/v1/solare/player/summary", {
+        query: {
+          nick: routeNick.value,
+          region: routeRegion.value,
+        },
+      });
+    } catch {
+      return null;
+    }
+  },
+  {
+    server: true,
+    lazy: import.meta.client,
+  },
+);
+
+const seoSource = computed(() => profile.value || ssrSummary.value || null);
+
+const seoTitle = computed(() => {
+  const p = seoSource.value;
+  if (!p) {
+    return `${routeNick.value} (${routeRegion.value}) — Arena of Solare Profile`;
+  }
+
+  const nick = p.user_nickname;
+  const region = p.region;
+  const ranking = p.current_ranking;
+  const hasRating = p.rank_rating !== null && p.rank_rating !== undefined;
+  const rating = hasRating ? Number(p.rank_rating) : null;
+  const className =
+    p.class_type !== null && p.class_type !== undefined
+      ? getClassName(p.class_type)
+      : null;
+  const totalGames = Number(p.overall?.total_games ?? 0);
+  const winrate = Number(p.overall?.winrate ?? 0);
+
+  const rankBadge = ranking ? `#${ranking} ${region}` : region;
+  const details = [];
+  if (className) details.push(className);
+  if (hasRating) details.push(`${rating.toLocaleString("en-US")} PTS`);
+  if (totalGames > 0) details.push(`${winrate.toFixed(1)}% WR`);
+
+  const suffix = details.length > 0 ? ` — ${details.join(" · ")}` : "";
+  return `${nick} (${rankBadge})${suffix} | Arena of Solare`;
+});
+
+const seoDescription = computed(() => {
+  const p = seoSource.value;
+  if (!p) {
+    return `View ${routeNick.value}'s official Black Desert Online Arena of Solare 3v3 ranked match history, class winrates, K/D ratio, combat stats, and replays in ${routeRegion.value}.`;
+  }
+
+  const season = p.season || 9;
+  const region = p.region;
+  const ranking = p.current_ranking;
+  const classRanking = p.class_ranking;
+  const hasRating = p.rank_rating !== null && p.rank_rating !== undefined;
+  const rating = hasRating ? Number(p.rank_rating) : null;
+  const tierInfo = hasRating ? getTierInfo(rating, ranking ?? 999) : null;
+  const tierName = tierInfo
+    ? tierInfo.name.replace(/\[([IVX]+)\]/g, "$1").trim()
+    : null;
+  const className =
+    p.class_type !== null && p.class_type !== undefined
+      ? getClassName(p.class_type)
+      : null;
+  const specName =
+    p.class_type !== null && p.class_type !== undefined
+      ? getSkillBranch(p.class_type, p.skill_branch_type)
+      : null;
+  const wins = Number(p.overall?.wins ?? 0);
+  const losses = Number(p.overall?.losses ?? 0);
+  const draws = Number(p.overall?.draws ?? 0);
+  const winrate = Number(p.overall?.winrate ?? 0);
+  const kdRatio =
+    p.kd_ratio !== null && p.kd_ratio !== undefined ? Number(p.kd_ratio) : null;
+
+  const segments = [`Season ${season} (${region})`];
+
+  if (ranking && tierName && hasRating) {
+    segments.push(
+      `Rank #${ranking} · ${tierName} (${rating.toLocaleString("en-US")} PTS)`,
+    );
+  } else if (tierName && hasRating) {
+    segments.push(`${tierName} (${rating.toLocaleString("en-US")} PTS)`);
+  } else if (ranking) {
+    segments.push(`Rank #${ranking} ${region}`);
+  } else {
+    segments.push("Unranked");
+  }
+
+  if (classRanking && className) {
+    segments.push(`Top #${classRanking} ${className}`);
+  }
+
+  if (className) {
+    segments.push(`${className} (${specName})`);
+  }
+
+  segments.push(
+    `${wins}W ${losses}L${draws > 0 ? ` ${draws}D` : ""} (${winrate.toFixed(1)}% WR)`,
+  );
+
+  if (kdRatio !== null) {
+    segments.push(`${kdRatio.toFixed(2)} K/D`);
+  }
+
+  return segments.join(" · ");
+});
+
+const seoOgImageUrl = computed(() => {
+  const p = seoSource.value;
+  if (!p) {
+    return `${requestUrl.origin}/images/solare/solare-icon-game@4x.png`;
+  }
+
+  const season = p.season || 9;
+  const ranking = p.current_ranking ?? "u";
+  const classRanking = p.class_ranking ?? "u";
+  const rating =
+    p.rank_rating !== null && p.rank_rating !== undefined ? p.rank_rating : "n";
+  const wins = p.overall?.wins ?? 0;
+  const losses = p.overall?.losses ?? 0;
+  const draws = p.overall?.draws ?? 0;
+  const cType = p.class_type ?? "x";
+  const sBranch = p.skill_branch_type ?? "x";
+  const kdToken =
+    p.kd_ratio !== null && p.kd_ratio !== undefined
+      ? Number(p.kd_ratio).toFixed(2)
+      : "n";
+  const classesToken = (p.classes || [])
+    .slice(0, 3)
+    .map(
+      (c) =>
+        `${c.class_type}.${c.skill_branch_type}.${c.total_games}.${c.wins}`,
+    )
+    .join("_");
+  const versionKey = [
+    season,
+    ranking,
+    classRanking,
+    rating,
+    wins,
+    losses,
+    draws,
+    cType,
+    sBranch,
+    kdToken,
+    classesToken || "0",
+  ].join("-");
+
+  const params = new URLSearchParams({
+    region: p.region,
+    nick: p.user_nickname,
+    v: versionKey,
+  });
+
+  return `${requestUrl.origin}/api/v1/solare/player/og?${params.toString()}`;
+});
+
+const seoCanonicalUrl = computed(() => {
+  const reg = (seoSource.value?.region || routeRegion.value).toLowerCase();
+  const nick = seoSource.value?.user_nickname || routeNick.value;
+  return `${requestUrl.origin}/solare/player/${reg}/${encodeURIComponent(nick)}`;
+});
+
 useSeoMeta({
-  title: () =>
-    profile.value
-      ? `${profile.value.user_nickname} (${profile.value.region}) — Arena of Solare Match History`
-      : `${routeNick.value} (${routeRegion.value}) — Arena of Solare Profile`,
-  description: () =>
-    `View ${routeNick.value}'s official Black Desert Online Arena of Solare 3v3 ranked match history, class winrates, K/D ratio, combat stats, and replays in ${routeRegion.value}.`,
+  title: () => seoTitle.value,
+  description: () => seoDescription.value,
+  ogTitle: () => seoTitle.value,
+  ogDescription: () => seoDescription.value,
+  ogType: () => (seoSource.value ? "profile" : "website"),
+  ogUrl: () => seoCanonicalUrl.value,
+  ogImage: () => seoOgImageUrl.value,
+  ogImageWidth: () => (seoSource.value ? 1200 : undefined),
+  ogImageHeight: () => (seoSource.value ? 630 : undefined),
+  ogImageType: "image/png",
+  ogImageAlt: () =>
+    seoSource.value
+      ? `${seoSource.value.user_nickname} (${seoSource.value.region}) Arena of Solare Season ${seoSource.value.season || 9} Share Card`
+      : "Arena of Solare",
+  twitterCard: () => (seoSource.value ? "summary_large_image" : "summary"),
+  twitterTitle: () => seoTitle.value,
+  twitterDescription: () => seoDescription.value,
+  twitterImage: () => seoOgImageUrl.value,
+  themeColor: () => (seoSource.value ? "#d4af6a" : "#1e1d1e"),
 });
 
 definePageMeta({
@@ -1778,6 +1972,8 @@ watch([routeRegion, routeNick], ([newReg, newNick]) => {
   searchRegion.value = newReg;
   searchQuery.value = newNick;
   persistSelectedRegion(newReg);
+  profile.value = null;
+  loadedMatches.value = [];
   selectedClassFilter.value = null;
   resultFilter.value = "all";
   loadInitialProfile();
