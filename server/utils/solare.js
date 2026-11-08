@@ -1259,23 +1259,11 @@ function formatMatchParticipant(row) {
   };
 }
 
-async function getPlayerProfile({
-  nick,
-  region,
-  countryCode,
-  season,
-  class_type: classTypeFilter,
-  page,
-  limit,
-} = {}) {
-  const targetNick = validateNick(nick);
-  const fallbackRegion = inferRegionFromCountry(countryCode);
-  const targetRegion = validateRegion(region, fallbackRegion);
-  const requestedSeason = validateSeason(season);
-  const validatedClassType = validateClassType(classTypeFilter);
-  const currentPage = validatePage(page);
-  const pageSize = validateLimit(limit);
-
+async function resolvePlayerIdentityAndSeason({
+  targetNick,
+  targetRegion,
+  requestedSeason,
+}) {
   const playerResult = await database.query({
     text: `
       SELECT
@@ -1296,6 +1284,7 @@ async function getPlayerProfile({
 
   let playerRow = playerResult.rows[0] || null;
   let resolvedUserNo = playerRow?.user_no || null;
+  let identityNickname = null;
 
   if (!resolvedUserNo) {
     const identityResult = await database.query({
@@ -1324,6 +1313,7 @@ async function getPlayerProfile({
     }
 
     resolvedUserNo = identityResult.rows[0]?.user_no || null;
+    identityNickname = identityResult.rows[0]?.user_nickname || null;
 
     if (!playerRow && resolvedUserNo) {
       const playerByUserNoResult = await database.query({
@@ -1384,6 +1374,478 @@ async function getPlayerProfile({
         : 9;
     }
   }
+
+  return {
+    playerRow,
+    resolvedUserNo,
+    identityNickname,
+    targetSeason,
+  };
+}
+
+async function resolvePlayerRankingPositions({
+  isPlayerRowForTargetSeason,
+  playerRow,
+  targetRegion,
+  targetSeason,
+  canonicalUserNo,
+  canonicalNick,
+}) {
+  let activeCurrentRanking = null;
+  let activeOfficialRanking =
+    isPlayerRowForTargetSeason && playerRow?.current_ranking !== null
+      ? Number(playerRow.current_ranking)
+      : null;
+  let activeClassRanking = null;
+
+  if (
+    isPlayerRowForTargetSeason &&
+    (playerRow.current_ranking !== null || playerRow.rank_rating !== null)
+  ) {
+    const rankingPositionResult = await database.query({
+      text: `
+        WITH deduplicated_ranking AS (
+          SELECT DISTINCT ON (
+            CASE
+              WHEN rank_rating IS NOT NULL THEN 'u:' || COALESCE(user_no::text, LOWER(user_nickname))
+              ELSE 'r:' || current_ranking::text
+            END
+          )
+            user_no,
+            user_nickname,
+            current_ranking,
+            rank_rating,
+            rating_achieved_record_no,
+            class_type,
+            win_count
+          FROM
+            solare_players
+          WHERE
+            region = $1
+            AND (
+              (current_ranking IS NOT NULL AND current_ranking >= 1)
+              OR rank_rating IS NOT NULL
+            )
+            AND (
+              season = $2
+              OR ($2 = 9 AND season IS NULL)
+            )
+          ORDER BY
+            CASE
+              WHEN rank_rating IS NOT NULL THEN 'u:' || COALESCE(user_no::text, LOWER(user_nickname))
+              ELSE 'r:' || current_ranking::text
+            END ASC,
+            rank_rating DESC NULLS LAST,
+            rating_achieved_record_no ASC NULLS LAST,
+            updated_at DESC,
+            last_seen_at DESC,
+            win_count DESC
+        ),
+        ranking_with_most_played_class AS (
+          SELECT
+            dr.user_no,
+            dr.user_nickname,
+            dr.current_ranking,
+            dr.rank_rating,
+            dr.rating_achieved_record_no,
+            dr.win_count,
+            COALESCE(mp_top.class_type, dr.class_type)::smallint AS class_type
+          FROM
+            deduplicated_ranking dr
+          LEFT JOIN LATERAL (
+            SELECT
+              mp.class_type
+            FROM
+              solare_match_players mp
+            INNER JOIN
+              solare_matches m
+              ON m.region = mp.region AND m.record_no = mp.record_no
+            WHERE
+              mp.region = $1
+              AND (
+                m.season = $2
+                OR ($2 = 9 AND m.season IS NULL)
+              )
+              AND (
+                (dr.user_no IS NOT NULL AND mp.user_no = dr.user_no)
+                OR ((dr.user_no IS NULL OR mp.user_no IS NULL) AND LOWER(mp.user_nickname) = LOWER(dr.user_nickname))
+              )
+              AND NOT EXISTS (
+                SELECT 1
+                FROM solare_match_mode_proofs smp
+                WHERE smp.region = mp.region
+                  AND smp.record_no = mp.record_no
+                  AND smp.mode = 'practice'
+              )
+            GROUP BY
+              mp.class_type,
+              mp.skill_branch_type
+            ORDER BY
+              COUNT(*) DESC,
+              SUM(CASE WHEN mp.is_winner THEN 1 ELSE 0 END) DESC,
+              mp.class_type ASC
+            LIMIT 1
+          ) mp_top ON true
+        ),
+        ranked_with_class AS (
+          SELECT
+            user_no,
+            user_nickname,
+            current_ranking,
+            CASE
+              WHEN rank_rating IS NOT NULL THEN
+                ROW_NUMBER() OVER (
+                  ORDER BY
+                    CASE WHEN rank_rating IS NOT NULL THEN 0 ELSE 1 END ASC,
+                    rank_rating DESC NULLS LAST,
+                    rating_achieved_record_no ASC NULLS LAST,
+                    current_ranking ASC NULLS LAST,
+                    win_count DESC
+                )::int
+              ELSE current_ranking
+            END AS effective_ranking,
+            class_type,
+            ROW_NUMBER() OVER (
+              PARTITION BY class_type
+              ORDER BY
+                CASE WHEN rank_rating IS NOT NULL THEN 0 ELSE 1 END ASC,
+                rank_rating DESC NULLS LAST,
+                rating_achieved_record_no ASC NULLS LAST,
+                current_ranking ASC NULLS LAST,
+                win_count DESC
+            )::int AS class_ranking
+          FROM
+            ranking_with_most_played_class
+        )
+        SELECT
+          current_ranking,
+          effective_ranking,
+          class_ranking
+        FROM
+          ranked_with_class
+        WHERE
+          ($3::bigint IS NOT NULL AND user_no = $3::bigint)
+          OR (($3::bigint IS NULL OR user_no IS NULL) AND LOWER(user_nickname) = LOWER($4))
+        ORDER BY
+          CASE WHEN $3::bigint IS NOT NULL AND user_no = $3::bigint THEN 0 ELSE 1 END ASC,
+          effective_ranking ASC NULLS LAST
+        LIMIT 1
+        ;`,
+      values: [targetRegion, targetSeason, canonicalUserNo, canonicalNick],
+    });
+
+    if (rankingPositionResult.rowCount > 0) {
+      activeCurrentRanking = Number(
+        rankingPositionResult.rows[0].effective_ranking,
+      );
+      if (rankingPositionResult.rows[0].current_ranking !== null) {
+        activeOfficialRanking = Number(
+          rankingPositionResult.rows[0].current_ranking,
+        );
+      }
+      activeClassRanking = Number(rankingPositionResult.rows[0].class_ranking);
+    }
+  }
+
+  return {
+    activeCurrentRanking,
+    activeOfficialRanking,
+    activeClassRanking,
+  };
+}
+
+async function getPlayerSummary({ nick, region, countryCode, season } = {}) {
+  const targetNick = validateNick(nick);
+  const fallbackRegion = inferRegionFromCountry(countryCode);
+  const targetRegion = validateRegion(region, fallbackRegion);
+  const requestedSeason = validateSeason(season);
+
+  const { playerRow, resolvedUserNo, identityNickname, targetSeason } =
+    await resolvePlayerIdentityAndSeason({
+      targetNick,
+      targetRegion,
+      requestedSeason,
+    });
+
+  const summaryStatsResult = await database.query({
+    text: `
+      WITH season_matches AS (
+        SELECT
+          mp.record_no,
+          mp.user_nickname,
+          mp.user_no,
+          mp.class_type,
+          mp.skill_branch_type,
+          mp.is_winner,
+          mp.kill_count,
+          mp.death_count,
+          mp.cc_applied_count,
+          mp.damage_done,
+          mp.damage_taken,
+          mp.recovery
+        FROM
+          solare_match_players mp
+        INNER JOIN
+          solare_matches m
+          ON m.region = mp.region AND m.record_no = mp.record_no
+        WHERE
+          mp.region = $1
+          AND (
+            m.season = $4
+            OR ($4 = 9 AND m.season IS NULL)
+          )
+          AND (
+            ($3::bigint IS NOT NULL AND mp.user_no = $3::bigint)
+            OR (($3::bigint IS NULL OR mp.user_no IS NULL) AND LOWER(mp.user_nickname) = LOWER($2))
+          )
+          AND NOT EXISTS (
+            SELECT 1
+            FROM solare_match_mode_proofs smp
+            WHERE smp.region = mp.region
+              AND smp.record_no = mp.record_no
+              AND smp.mode = 'practice'
+          )
+      ),
+      class_stats AS (
+        SELECT
+          class_type,
+          skill_branch_type,
+          COUNT(*)::int AS total_games,
+          COUNT(*) FILTER (WHERE is_winner IS TRUE)::int AS wins,
+          COUNT(*) FILTER (WHERE is_winner IS FALSE)::int AS losses,
+          COALESCE(SUM(kill_count), 0)::bigint AS sum_kills,
+          COALESCE(SUM(death_count), 0)::bigint AS sum_deaths,
+          COALESCE(SUM(cc_applied_count), 0)::bigint AS sum_cc,
+          COALESCE(SUM(damage_done), 0)::bigint AS sum_damage_done,
+          COALESCE(SUM(damage_taken), 0)::bigint AS sum_damage_taken,
+          COALESCE(SUM(recovery), 0)::bigint AS sum_recovery
+        FROM
+          season_matches
+        GROUP BY
+          class_type,
+          skill_branch_type
+      ),
+      latest_identity AS (
+        SELECT
+          (SELECT user_nickname FROM season_matches ORDER BY record_no DESC LIMIT 1) AS latest_nickname,
+          (SELECT user_no FROM season_matches WHERE user_no IS NOT NULL ORDER BY record_no DESC LIMIT 1) AS latest_user_no
+      )
+      SELECT
+        cs.class_type,
+        cs.skill_branch_type,
+        cs.total_games,
+        cs.wins,
+        cs.losses,
+        cs.sum_kills,
+        cs.sum_deaths,
+        cs.sum_cc,
+        cs.sum_damage_done,
+        cs.sum_damage_taken,
+        cs.sum_recovery,
+        li.latest_nickname,
+        li.latest_user_no
+      FROM
+        latest_identity li
+      LEFT JOIN
+        class_stats cs ON true
+      ORDER BY
+        cs.total_games DESC NULLS LAST,
+        cs.wins DESC NULLS LAST,
+        cs.class_type ASC NULLS LAST,
+        cs.skill_branch_type ASC NULLS LAST
+      ;`,
+    values: [targetRegion, targetNick, resolvedUserNo, targetSeason],
+  });
+
+  const statRows = summaryStatsResult.rows;
+  const latestNickname = statRows[0]?.latest_nickname || null;
+  const latestUserNo = statRows[0]?.latest_user_no || null;
+  const classRows = statRows.filter(
+    (r) => r.class_type !== null && r.class_type !== undefined,
+  );
+
+  let totalSeasonMatches = 0;
+  let matchWins = 0;
+  let matchLosses = 0;
+  let sumKills = 0;
+  let sumDeaths = 0;
+  let sumCc = 0;
+  let sumDamageDone = 0;
+  let sumDamageTaken = 0;
+  let sumRecovery = 0;
+
+  const classes = classRows.map((c) => {
+    const cGames = Number(c.total_games || 0);
+    const cWins = Number(c.wins || 0);
+    const cLosses = Number(c.losses || 0);
+    const cKills = Number(c.sum_kills || 0);
+    const cDeaths = Number(c.sum_deaths || 0);
+    const cCc = Number(c.sum_cc || 0);
+    const cDmgDone = Number(c.sum_damage_done || 0);
+    const cDmgTaken = Number(c.sum_damage_taken || 0);
+    const cRecovery = Number(c.sum_recovery || 0);
+
+    totalSeasonMatches += cGames;
+    matchWins += cWins;
+    matchLosses += cLosses;
+    sumKills += cKills;
+    sumDeaths += cDeaths;
+    sumCc += cCc;
+    sumDamageDone += cDmgDone;
+    sumDamageTaken += cDmgTaken;
+    sumRecovery += cRecovery;
+
+    return {
+      class_type: Number(c.class_type),
+      skill_branch_type: Number(c.skill_branch_type),
+      wins: cWins,
+      losses: cLosses,
+      draws: 0,
+      total_games: cGames,
+      winrate: cGames > 0 ? Number(((cWins / cGames) * 100).toFixed(1)) : 0,
+      averages: {
+        kills: cGames > 0 ? Number((cKills / cGames).toFixed(1)) : 0,
+        deaths: cGames > 0 ? Number((cDeaths / cGames).toFixed(1)) : 0,
+        cc: cGames > 0 ? Number((cCc / cGames).toFixed(1)) : 0,
+        damage_done: cGames > 0 ? Math.round(cDmgDone / cGames) : 0,
+        damage_taken: cGames > 0 ? Math.round(cDmgTaken / cGames) : 0,
+        recovery: cGames > 0 ? Math.round(cRecovery / cGames) : 0,
+      },
+    };
+  });
+
+  const hasSeasonMatches = totalSeasonMatches > 0;
+
+  const isPlayerRowForTargetSeason =
+    playerRow &&
+    (Number(playerRow.season) === targetSeason ||
+      (targetSeason === 9 &&
+        (playerRow.season === null || playerRow.season === undefined)));
+
+  const overallWins = isPlayerRowForTargetSeason
+    ? Number(playerRow.win_count)
+    : matchWins;
+  const overallLosses = isPlayerRowForTargetSeason
+    ? Number(playerRow.lose_count)
+    : matchLosses;
+  const overallDraws = isPlayerRowForTargetSeason
+    ? Number(playerRow.draw_count)
+    : 0;
+  const overallTotalGames = overallWins + overallLosses + overallDraws;
+  const overallWinrate =
+    overallTotalGames > 0
+      ? Number(((overallWins / overallTotalGames) * 100).toFixed(1))
+      : 0;
+
+  const canonicalNick =
+    playerRow?.user_nickname ||
+    latestNickname ||
+    identityNickname ||
+    targetNick;
+  const canonicalUserNo =
+    playerRow?.user_no || latestUserNo || resolvedUserNo || null;
+  const primaryClassType =
+    classes[0]?.class_type ??
+    (isPlayerRowForTargetSeason ? playerRow.class_type : null) ??
+    playerRow?.class_type ??
+    null;
+  const primarySkillBranchType =
+    classes[0]?.skill_branch_type ??
+    (isPlayerRowForTargetSeason ? playerRow.skill_branch_type : null) ??
+    playerRow?.skill_branch_type ??
+    null;
+
+  const { activeCurrentRanking, activeOfficialRanking, activeClassRanking } =
+    await resolvePlayerRankingPositions({
+      isPlayerRowForTargetSeason,
+      playerRow,
+      targetRegion,
+      targetSeason,
+      canonicalUserNo,
+      canonicalNick,
+    });
+
+  const activeRankRating =
+    isPlayerRowForTargetSeason &&
+    playerRow?.rank_rating !== null &&
+    playerRow?.rank_rating !== undefined
+      ? Number(playerRow.rank_rating)
+      : null;
+
+  return {
+    region: targetRegion,
+    season: targetSeason,
+    user_nickname: canonicalNick,
+    user_no: canonicalUserNo ? String(canonicalUserNo) : null,
+    current_ranking: activeCurrentRanking,
+    official_ranking: activeOfficialRanking,
+    class_ranking: activeClassRanking,
+    rank_rating: activeRankRating,
+    rating_is_estimated: Boolean(
+      isPlayerRowForTargetSeason && playerRow?.rating_is_estimated,
+    ),
+    class_type: primaryClassType !== null ? Number(primaryClassType) : null,
+    skill_branch_type:
+      primarySkillBranchType !== null ? Number(primarySkillBranchType) : null,
+    kd_ratio: hasSeasonMatches
+      ? sumDeaths > 0
+        ? Number((sumKills / sumDeaths).toFixed(2))
+        : Number((sumKills / totalSeasonMatches).toFixed(2))
+      : null,
+    overall: {
+      wins: overallWins,
+      losses: overallLosses,
+      draws: overallDraws,
+      total_games: overallTotalGames,
+      winrate: overallWinrate,
+    },
+    averages: {
+      kills: hasSeasonMatches
+        ? Number((sumKills / totalSeasonMatches).toFixed(1))
+        : 0,
+      deaths: hasSeasonMatches
+        ? Number((sumDeaths / totalSeasonMatches).toFixed(1))
+        : 0,
+      cc: hasSeasonMatches
+        ? Number((sumCc / totalSeasonMatches).toFixed(1))
+        : 0,
+      damage_done: hasSeasonMatches
+        ? Math.round(sumDamageDone / totalSeasonMatches)
+        : 0,
+      damage_taken: hasSeasonMatches
+        ? Math.round(sumDamageTaken / totalSeasonMatches)
+        : 0,
+      recovery: hasSeasonMatches
+        ? Math.round(sumRecovery / totalSeasonMatches)
+        : 0,
+    },
+    classes,
+  };
+}
+
+async function getPlayerProfile({
+  nick,
+  region,
+  countryCode,
+  season,
+  class_type: classTypeFilter,
+  page,
+  limit,
+} = {}) {
+  const targetNick = validateNick(nick);
+  const fallbackRegion = inferRegionFromCountry(countryCode);
+  const targetRegion = validateRegion(region, fallbackRegion);
+  const requestedSeason = validateSeason(season);
+  const validatedClassType = validateClassType(classTypeFilter);
+  const currentPage = validatePage(page);
+  const pageSize = validateLimit(limit);
+
+  const { playerRow, resolvedUserNo, identityNickname, targetSeason } =
+    await resolvePlayerIdentityAndSeason({
+      targetNick,
+      targetRegion,
+      requestedSeason,
+    });
 
   const seasonMatchesResult = await database.query({
     text: `
@@ -1543,7 +2005,8 @@ async function getPlayerProfile({
       (a, b) =>
         b.total_games - a.total_games ||
         b.wins - a.wins ||
-        a.class_type - b.class_type,
+        a.class_type - b.class_type ||
+        a.skill_branch_type - b.skill_branch_type,
     )
     .map((c) => ({
       class_type: c.class_type,
@@ -1598,7 +2061,10 @@ async function getPlayerProfile({
       : 0;
 
   const canonicalNick =
-    playerRow?.user_nickname || latestMatchRow?.user_nickname || targetNick;
+    playerRow?.user_nickname ||
+    latestMatchRow?.user_nickname ||
+    identityNickname ||
+    targetNick;
   const canonicalUserNo =
     playerRow?.user_no || latestUserNo || resolvedUserNo || null;
   const primaryClassType =
@@ -1705,158 +2171,15 @@ async function getPlayerProfile({
     });
   }
 
-  let activeCurrentRanking = null;
-  let activeOfficialRanking =
-    isPlayerRowForTargetSeason && playerRow?.current_ranking !== null
-      ? Number(playerRow.current_ranking)
-      : null;
-  let activeClassRanking = null;
-
-  if (
-    isPlayerRowForTargetSeason &&
-    (playerRow.current_ranking !== null || playerRow.rank_rating !== null)
-  ) {
-    const rankingPositionResult = await database.query({
-      text: `
-        WITH deduplicated_ranking AS (
-          SELECT DISTINCT ON (
-            CASE
-              WHEN rank_rating IS NOT NULL THEN 'u:' || COALESCE(user_no::text, LOWER(user_nickname))
-              ELSE 'r:' || current_ranking::text
-            END
-          )
-            user_no,
-            user_nickname,
-            current_ranking,
-            rank_rating,
-            rating_achieved_record_no,
-            class_type,
-            win_count
-          FROM
-            solare_players
-          WHERE
-            region = $1
-            AND (
-              (current_ranking IS NOT NULL AND current_ranking >= 1)
-              OR rank_rating IS NOT NULL
-            )
-            AND (
-              season = $2
-              OR ($2 = 9 AND season IS NULL)
-            )
-          ORDER BY
-            CASE
-              WHEN rank_rating IS NOT NULL THEN 'u:' || COALESCE(user_no::text, LOWER(user_nickname))
-              ELSE 'r:' || current_ranking::text
-            END ASC,
-            rank_rating DESC NULLS LAST,
-            rating_achieved_record_no ASC NULLS LAST,
-            updated_at DESC,
-            last_seen_at DESC,
-            win_count DESC
-        ),
-        ranking_with_most_played_class AS (
-          SELECT
-            dr.user_no,
-            dr.user_nickname,
-            dr.current_ranking,
-            dr.rank_rating,
-            dr.rating_achieved_record_no,
-            dr.win_count,
-            COALESCE(mp_top.class_type, dr.class_type)::smallint AS class_type
-          FROM
-            deduplicated_ranking dr
-          LEFT JOIN LATERAL (
-            SELECT
-              mp.class_type
-            FROM
-              solare_match_players mp
-            INNER JOIN
-              solare_matches m
-              ON m.region = mp.region AND m.record_no = mp.record_no
-            WHERE
-              mp.region = $1
-              AND (
-                m.season = $2
-                OR ($2 = 9 AND m.season IS NULL)
-              )
-              AND (
-                (dr.user_no IS NOT NULL AND mp.user_no = dr.user_no)
-                OR ((dr.user_no IS NULL OR mp.user_no IS NULL) AND LOWER(mp.user_nickname) = LOWER(dr.user_nickname))
-              )
-              AND NOT EXISTS (
-                SELECT 1
-                FROM solare_match_mode_proofs smp
-                WHERE smp.region = mp.region
-                  AND smp.record_no = mp.record_no
-                  AND smp.mode = 'practice'
-              )
-            GROUP BY
-              mp.class_type,
-              mp.skill_branch_type
-            ORDER BY
-              COUNT(*) DESC,
-              SUM(CASE WHEN mp.is_winner THEN 1 ELSE 0 END) DESC,
-               mp.class_type ASC
-            LIMIT 1
-          ) mp_top ON true
-        ),
-        ranked_with_class AS (
-          SELECT
-            user_no,
-            user_nickname,
-            current_ranking,
-            CASE
-              WHEN rank_rating IS NOT NULL THEN
-                ROW_NUMBER() OVER (
-                  ORDER BY
-                    CASE WHEN rank_rating IS NOT NULL THEN 0 ELSE 1 END ASC,
-                    rank_rating DESC NULLS LAST,
-                    rating_achieved_record_no ASC NULLS LAST,
-                    current_ranking ASC NULLS LAST,
-                    win_count DESC
-                )::int
-              ELSE current_ranking
-            END AS effective_ranking,
-            class_type,
-            ROW_NUMBER() OVER (
-              PARTITION BY class_type
-              ORDER BY
-                CASE WHEN rank_rating IS NOT NULL THEN 0 ELSE 1 END ASC,
-                rank_rating DESC NULLS LAST,
-                rating_achieved_record_no ASC NULLS LAST,
-                current_ranking ASC NULLS LAST,
-                win_count DESC
-            )::int AS class_ranking
-          FROM
-            ranking_with_most_played_class
-        )
-        SELECT
-          current_ranking,
-          effective_ranking,
-          class_ranking
-        FROM
-          ranked_with_class
-        WHERE
-          ($3::bigint IS NOT NULL AND user_no = $3::bigint)
-          OR LOWER(user_nickname) = LOWER($4)
-        LIMIT 1
-        ;`,
-      values: [targetRegion, targetSeason, canonicalUserNo, canonicalNick],
+  const { activeCurrentRanking, activeOfficialRanking, activeClassRanking } =
+    await resolvePlayerRankingPositions({
+      isPlayerRowForTargetSeason,
+      playerRow,
+      targetRegion,
+      targetSeason,
+      canonicalUserNo,
+      canonicalNick,
     });
-
-    if (rankingPositionResult.rowCount > 0) {
-      activeCurrentRanking = Number(
-        rankingPositionResult.rows[0].effective_ranking,
-      );
-      if (rankingPositionResult.rows[0].current_ranking !== null) {
-        activeOfficialRanking = Number(
-          rankingPositionResult.rows[0].current_ranking,
-        );
-      }
-      activeClassRanking = Number(rankingPositionResult.rows[0].class_ranking);
-    }
-  }
 
   const activeRankRating =
     isPlayerRowForTargetSeason &&
@@ -1880,6 +2203,11 @@ async function getPlayerProfile({
     class_type: primaryClassType !== null ? Number(primaryClassType) : null,
     skill_branch_type:
       primarySkillBranchType !== null ? Number(primarySkillBranchType) : null,
+    kd_ratio: hasSeasonMatches
+      ? sumDeaths > 0
+        ? Number((sumKills / sumDeaths).toFixed(2))
+        : Number((sumKills / totalSeasonMatches).toFixed(2))
+      : null,
     overall: {
       wins: overallWins,
       losses: overallLosses,
@@ -3088,6 +3416,7 @@ const solare = {
   createOrResetSession,
   getOverlayData,
   getChatSummary,
+  getPlayerSummary,
   getPlayerProfile,
   getRanking,
 };
