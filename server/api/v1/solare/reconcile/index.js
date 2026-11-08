@@ -49,11 +49,15 @@ export default controller.handle({
   get: async (event) => {
     assertAuthorizedMaintenanceRequest(event);
     const query = getQuery(event);
+    const isCronBearerRequest = solare.verifyCronBearerToken(
+      getHeader(event, "authorization"),
+    );
 
     const summary = await solare.runAutomatedMaintenance({
       region: query.region,
       season: query.season,
-      autoClamp: query.auto_clamp,
+      autoClamp:
+        query.auto_clamp !== undefined ? query.auto_clamp : isCronBearerRequest,
       applyDecay: query.apply_decay,
     });
 

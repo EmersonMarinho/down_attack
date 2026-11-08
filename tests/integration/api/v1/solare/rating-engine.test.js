@@ -1807,5 +1807,150 @@ describe("Solare Continuous Elo Rating Engine", () => {
         rating_is_estimated: false,
       });
     });
+
+    test("LNIS auto_clamp fixes underestimated/overestimated outliers without domino-crushing, preserves unseeded decay, and protects post-snapshot climbers", async () => {
+      const fourDaysAgo = new Date(
+        Date.now() - 4 * 24 * 60 * 60 * 1000,
+      ).toISOString();
+      const twoDaysAgo = new Date(
+        Date.now() - 2 * 24 * 60 * 60 * 1000,
+      ).toISOString();
+      const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+
+      // Seed Season 10 SA leaderboard with:
+      // - Stale ghost at #18 (GhostRank18, 2200, seen 2 days ago) vs active #18 (BonelliS10, 2151, seen 1h ago)
+      // - Monotonic backbone: #17 (2111), #19 (2110), #88 (1869), #89 (1867), #91 (1867), #92 (1866)
+      // - Underestimated outlier: #90 (AhaiS10, 1844) -> must lift to 1867 WITHOUT crushing #91/#92!
+      // - Active intraday climber: #250 (LiveClimberS10, 1950) with a post-snapshot match -> must NOT be clamped!
+      await database.query({
+        text: `
+          INSERT INTO solare_players (
+            region, season, user_no, user_nickname, current_ranking, class_type, skill_branch_type,
+            win_count, lose_count, draw_count, rank_rating, rating_is_estimated,
+            rating_anchor_record_no, rating_achieved_record_no, rating_achieved_at, last_seen_at, updated_at
+          ) VALUES
+            ('SA', 10, 910017, 'King999S10', 17, 20, 1, 80, 40, 0, 2111, FALSE, 999001, 999001, $2, $2, $2),
+            ('SA', 10, 910999, 'GhostRank18', 18, 20, 1, 40, 10, 0, 2200, FALSE, 999001, 999001, $1, $1, $1),
+            ('SA', 10, 910018, 'BonelliS10', 18, 29, 1, 69, 35, 0, 2151, FALSE, 999001, 999001, $2, $2, $2),
+            ('SA', 10, 910019, 'RavioleteS10', 19, 20, 1, 95, 54, 0, 2110, FALSE, 999001, 999001, $2, $2, $2),
+            ('SA', 10, 910088, 'IlumiS10', 88, 20, 1, 69, 48, 0, 1869, FALSE, 999001, 999001, $2, $2, $2),
+            ('SA', 10, 910089, 'JekinsS10', 89, 20, 1, 72, 44, 0, 1867, FALSE, 999001, 999001, $2, $2, $2),
+            ('SA', 10, 910090, 'AhaiS10', 90, 11, 1, 99, 86, 0, 1844, FALSE, NULL, 999001, $2, $2, $2),
+            ('SA', 10, 910091, 'CrowleyS10', 91, 20, 1, 72, 40, 0, 1867, FALSE, 999001, 999001, $2, $2, $2),
+            ('SA', 10, 910092, 'MikaS10', 92, 20, 1, 35, 13, 0, 1866, FALSE, 999001, 999001, $2, $2, $2),
+            ('SA', 10, 910250, 'LiveClimberS10', 250, 20, 1, 35, 5, 0, 1950, FALSE, 999001, 999050, $2, $2, $2)
+          ;`,
+        values: [twoDaysAgo, oneHourAgo],
+      });
+
+      // Insert a post-snapshot match for LiveClimberS10 (match_date = NOW() > oneHourAgo + 10s)
+      await database.query({
+        text: `
+          INSERT INTO solare_matches (region, season, record_no, play_time_seconds, win_record, match_date)
+          VALUES ('SA', 10, 999050, 200, ARRAY[2, 2], NOW())
+          ON CONFLICT (region, record_no) DO NOTHING;
+        `,
+      });
+      await database.query({
+        text: `
+          INSERT INTO solare_match_players (
+            region, record_no, team, user_nickname, user_no, class_type, skill_branch_type,
+            kill_count, death_count, cc_applied_count, damage_done, damage_taken, recovery,
+            is_winner, vary_rank_rating
+          ) VALUES ('SA', 999050, 0, 'LiveClimberS10', 910250, 20, 1, 3, 1, 8, 100000, 80000, 40000, true, 0);
+        `,
+      });
+
+      // Also seed an unseeded player (inferred_start) in RU Season 10 who was inactive for 4 days -> must keep decay!
+      await database.query({
+        text: `
+          INSERT INTO solare_players (
+            region, season, user_no, user_nickname, current_ranking, class_type, skill_branch_type,
+            win_count, lose_count, draw_count, rank_rating, rating_is_estimated,
+            rating_anchor_record_no, rating_achieved_record_no, rating_achieved_at, last_seen_at, updated_at
+          ) VALUES
+            ('RU', 10, 920001, 'RuUnseededDecay', 1, 20, 1, 1, 0, 0, 1840, FALSE, NULL, 999100, $1, $1, $1),
+            ('RU', 10, 920002, 'RuAnchor2', 2, 20, 1, 10, 5, 0, 1800, FALSE, 999100, 999100, $2, $2, $2)
+          ;`,
+        values: [fourDaysAgo, oneHourAgo],
+      });
+      await database.query({
+        text: `
+          INSERT INTO solare_player_rating_events (
+            region, season, user_no, user_nickname, record_no, event_type, previous_rating, rating_delta, new_rating
+          ) VALUES
+            ('RU', 10, 920001, 'RuUnseededDecay', 999100, 'inferred_start', 801, 1039, 1840)
+          ;`,
+      });
+
+      await solare.runAutomatedMaintenance({
+        region: "RU",
+        season: 10,
+        autoClamp: true,
+      });
+
+      const ruDecayCheck = await database.query({
+        text: "SELECT rank_rating, last_decay_at FROM solare_players WHERE region = 'RU' AND user_no = 920001;",
+      });
+      // 1840 decayed by -30 -> 1810, and NOT overwritten back to 1840 by runUnseededInferencePass!
+      expect(ruDecayCheck.rows[0].rank_rating).toBe(1810);
+      expect(ruDecayCheck.rows[0].last_decay_at).not.toBeNull();
+
+      const saMaint = await solare.runAutomatedMaintenance({
+        region: "SA",
+        season: 10,
+        autoClamp: true,
+        applyDecay: false,
+      });
+      expect(saMaint.total_discrepancies).toBe(0);
+      expect(saMaint.total_reconciled).toBe(2);
+
+      const saRows = await database.query({
+        text: `
+          SELECT user_nickname, current_ranking, rank_rating
+          FROM solare_players
+          WHERE region = 'SA' AND season = 10
+          ORDER BY user_no ASC;
+        `,
+      });
+      const byNick = Object.fromEntries(
+        saRows.rows.map((r) => [
+          r.user_nickname,
+          { rank: r.current_ranking, rating: r.rank_rating },
+        ]),
+      );
+
+      // GhostRank18 had its stale current_ranking cleared to NULL
+      expect(byNick.GhostRank18.rank).toBeNull();
+      // BonelliS10 (#18) was interpolated between #17 (2111) and #19 (2110) -> 2111
+      expect(byNick.BonelliS10).toEqual({ rank: 18, rating: 2111 });
+      // AhaiS10 (#90) was lifted to 1867 between #89 (1867) and #91 (1867)
+      expect(byNick.AhaiS10).toEqual({ rank: 90, rating: 1867 });
+      // #91 and #92 were NOT domino-crushed to 1844!
+      expect(byNick.CrowleyS10).toEqual({ rank: 91, rating: 1867 });
+      expect(byNick.MikaS10).toEqual({ rank: 92, rating: 1866 });
+      // LiveClimberS10 (#250 with post-snapshot match) kept its live 1950 rating!
+      expect(byNick.LiveClimberS10).toEqual({ rank: 250, rating: 1950 });
+
+      // Simulate solare-crawler's end-of-day regional window hook:
+      // Reset BonelliS10 (#18) back to 2151 and AhaiS10 (#90) back to 1844, then call fn_refresh_solare_practice_suspects('SA', 0)
+      await database.query({
+        text: `
+          UPDATE solare_players
+          SET rank_rating = CASE WHEN user_no = 910018 THEN 2151 ELSE 1844 END
+          WHERE region = 'SA' AND user_no IN (910018, 910090);
+        `,
+      });
+      await database.query({
+        text: "SELECT fn_refresh_solare_practice_suspects('SA', 0);",
+      });
+      const crawlerHookCheck = await database.query({
+        text: "SELECT user_nickname, rank_rating FROM solare_players WHERE region = 'SA' AND user_no IN (910018, 910090) ORDER BY user_no ASC;",
+      });
+      expect(crawlerHookCheck.rows).toEqual([
+        { user_nickname: "BonelliS10", rank_rating: 2111 },
+        { user_nickname: "AhaiS10", rank_rating: 1867 },
+      ]);
+    });
   });
 });
