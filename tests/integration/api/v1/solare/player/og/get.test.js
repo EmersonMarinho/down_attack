@@ -111,7 +111,7 @@ describe("GET /api/v1/solare/player/og", () => {
 
       // With version fingerprint -> long CDN cache
       const versionedRes = await fetch(
-        `${webserver.origin}/api/v1/solare/player/og?nick=DiscordEmbedHero&region=SA&v=9-1-1-2508-80-20-0-20-1-3.00-20.1.1.1`,
+        `${webserver.origin}/api/v1/solare/player/og?nick=DiscordEmbedHero&region=SA&v=v2-9-1-1-2508-80-20-0-20-1-3.00-20.1.1.1`,
       );
       expect(versionedRes.status).toBe(200);
       expect(versionedRes.headers.get("content-type")).toBe("image/png");
@@ -184,7 +184,7 @@ describe("SSR OpenGraph embeds on /solare/player/:region/:nick", () => {
     // Must override global default og:image cleanly with a single absolute dynamic card URL
     expect(ogImages).toHaveLength(1);
     expect(ogImages[0].content).toBe(
-      `${webserver.origin}/api/v1/solare/player/og?region=SA&nick=DiscordEmbedHero&v=9-1-1-2508-80-20-0-20-1-3.00-20.1.1.1`,
+      `${webserver.origin}/api/v1/solare/player/og?region=SA&nick=DiscordEmbedHero&v=v2-9-1-1-2508-80-20-0-20-1-3.00-20.1.1.1`,
     );
     expect(ogImageWidth).toBe("1200");
     expect(ogImageHeight).toBe("630");

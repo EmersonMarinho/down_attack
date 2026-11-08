@@ -90,15 +90,15 @@ describe("server/utils/solareOgCard.js", () => {
 
     const tree = buildSolarePlayerOgTree(summary);
     const texts = collectTextNodes(tree).join(" | ");
-    expect(texts).toContain("OKAZAKI");
-    expect(texts).toContain("RANK #12");
-    expect(texts).toContain("Top #2 Musa");
+    expect(texts).toContain("Okazaki");
+    expect(texts).not.toContain("OKAZAKI");
+    expect(texts).toContain("#12");
+    expect(texts).toContain("Top #2");
     expect(texts).toContain("Solare Incarnate");
-    expect(texts).toContain("2,450");
-    expect(texts).toContain("78W");
-    expect(texts).toContain("48L");
-    expect(texts).toContain("61.9%");
-    expect(texts).toContain("DOWN-ATTACK.COM");
+    expect(texts).toContain("2,450 PTS");
+    expect(texts).toContain("78W / 48L");
+    expect(texts).toContain("Win Rate 62%");
+    expect(texts).toContain("DOWN ATTACK");
 
     const pngBytes = await renderSolarePlayerOgPng(summary);
     const { width, height, byteLength } = readPngDimensions(pngBytes);
@@ -133,12 +133,12 @@ describe("server/utils/solareOgCard.js", () => {
 
     const tree = buildSolarePlayerOgTree(summary);
     const texts = collectTextNodes(tree).join(" | ");
-    expect(texts).toContain("SEASON 9");
-    expect(texts).toContain("Season 9 Contender");
-    expect(texts).toContain("1.75");
-    expect(texts).toContain("K/D RATIO");
-    expect(texts).toContain("1D");
-    expect(texts).toContain("No Extra Class");
+    expect(texts).toContain("Валькирия_Áéí");
+    expect(texts).toContain("#RU");
+    expect(texts).toContain("Season 9");
+    expect(texts).toContain("1.75 K/D");
+    expect(texts).toContain("14W / 9L / 1D");
+    expect(texts).toContain("Win Rate 58%");
 
     const pngBytes = await renderSolarePlayerOgPng(summary);
     const { width, height, byteLength } = readPngDimensions(pngBytes);

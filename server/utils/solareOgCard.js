@@ -211,32 +211,6 @@ function h(type, props, ...children) {
   };
 }
 
-function getWinrateTheme(winrate) {
-  const wr = Number(winrate) || 0;
-  if (wr >= 65) {
-    return {
-      stroke: "#34d399",
-      badgeBg: "#022c22",
-      badgeText: "#6ee7b7",
-      badgeBorder: "rgba(16, 185, 129, 0.55)",
-    };
-  }
-  if (wr >= 50) {
-    return {
-      stroke: "#38bdf8",
-      badgeBg: "#082f49",
-      badgeText: "#7dd3fc",
-      badgeBorder: "rgba(14, 165, 233, 0.55)",
-    };
-  }
-  return {
-    stroke: "#fb7185",
-    badgeBg: "#4c0519",
-    badgeText: "#fda4af",
-    badgeBorder: "rgba(244, 63, 94, 0.55)",
-  };
-}
-
 function formatTierHeadline(name) {
   if (!name) return "Arena of Solare";
   if (name.startsWith("Solare Incarnate")) {
@@ -245,7 +219,7 @@ function formatTierHeadline(name) {
   return name.replace(/\[([IVX]+)\]/g, "$1").trim();
 }
 
-function buildClassCard(classEntry) {
+function buildClassItem(classEntry) {
   const className = getClassName(classEntry.class_type);
   const specName = getSkillBranch(
     classEntry.class_type,
@@ -257,12 +231,12 @@ function buildClassCard(classEntry) {
     Math.min(100, Number(classEntry.winrate || 0)),
   );
   const winrateRounded = Math.round(winrateNum);
-  const theme = getWinrateTheme(winrateNum);
   const avatarUri = getRoundClassAvatarDataUri(classEntry.class_type);
 
-  const radius = 34;
+  const radius = 36;
   const circumference = 2 * Math.PI * radius;
-  const dashLength = (winrateNum / 100) * circumference;
+  const visibleArc = (296 / 360) * circumference;
+  const winArc = (winrateNum / 100) * visibleArc;
 
   return h(
     "div",
@@ -271,15 +245,11 @@ function buildClassCard(classEntry) {
         display: "flex",
         alignItems: "center",
         flex: 1,
-        height: "130px",
-        boxSizing: "border-box",
-        backgroundColor: "#13151e",
-        border: "1px solid #222636",
-        borderRadius: "14px",
-        padding: "16px 22px",
+        minWidth: 0,
         gap: "18px",
       },
     },
+    // Dual-color Win/Loss Ring + Avatar + Bottom % Label (OP.GG style)
     h(
       "div",
       {
@@ -288,60 +258,63 @@ function buildClassCard(classEntry) {
           alignItems: "center",
           justifyContent: "center",
           position: "relative",
-          width: "80px",
-          height: "86px",
+          width: "84px",
+          height: "90px",
           flexShrink: 0,
         },
       },
       h(
         "svg",
         {
-          width: "78",
-          height: "78",
-          viewBox: "0 0 78 78",
+          width: "84",
+          height: "84",
+          viewBox: "0 0 84 84",
           style: {
             position: "absolute",
             top: "0px",
-            left: "1px",
-            transform: "rotate(-90deg)",
+            left: "0px",
+            transform: "rotate(122deg)",
           },
         },
+        // Loss / background track over the open-bottom ring
         h("circle", {
-          cx: "39",
-          cy: "39",
+          cx: "42",
+          cy: "42",
           r: String(radius),
           fill: "none",
-          stroke: "#1f2937",
-          "stroke-width": "6",
+          stroke: totalGames > 0 ? "#e84057" : "#2c303d",
+          "stroke-width": "5.5",
+          "stroke-dasharray": `${visibleArc.toFixed(2)} ${circumference.toFixed(2)}`,
+          "stroke-linecap": "butt",
         }),
-        winrateNum > 0
+        // Win arc (OP.GG blue)
+        totalGames > 0 && winrateNum > 0
           ? h("circle", {
-              cx: "39",
-              cy: "39",
+              cx: "42",
+              cy: "42",
               r: String(radius),
               fill: "none",
-              stroke: theme.stroke,
-              "stroke-width": "6",
-              "stroke-dasharray": `${dashLength.toFixed(2)} ${circumference.toFixed(2)}`,
-              "stroke-linecap": "round",
+              stroke: "#5383e8",
+              "stroke-width": "5.5",
+              "stroke-dasharray": `${winArc.toFixed(2)} ${circumference.toFixed(2)}`,
+              "stroke-linecap": "butt",
             })
           : null,
       ),
       avatarUri
         ? h("img", {
             src: avatarUri,
-            width: 56,
-            height: 56,
+            width: 60,
+            height: 60,
             style: {
               position: "absolute",
-              top: "11px",
+              top: "12px",
               left: "12px",
-              width: "56px",
-              height: "56px",
+              width: "60px",
+              height: "60px",
               borderRadius: "999px",
               objectFit: "cover",
-              backgroundColor: "#0c0e14",
-              border: "1.5px solid rgba(255, 255, 255, 0.22)",
+              backgroundColor: "#121318",
             },
           })
         : null,
@@ -354,13 +327,12 @@ function buildClassCard(classEntry) {
             justifyContent: "center",
             position: "absolute",
             bottom: "0px",
-            backgroundColor: theme.badgeBg,
-            color: theme.badgeText,
-            border: `1px solid ${theme.badgeBorder}`,
+            backgroundColor: "#181920",
+            color: "#ffffff",
             borderRadius: "6px",
-            padding: "2px 8px",
-            fontSize: "12px",
-            fontWeight: 900,
+            padding: "1px 7px",
+            fontSize: "18px",
+            fontWeight: 800,
             lineHeight: 1.1,
             whiteSpace: "nowrap",
           },
@@ -368,6 +340,7 @@ function buildClassCard(classEntry) {
         `${winrateRounded}%`,
       ),
     ),
+    // Class Name + Spec + Matches
     h(
       "div",
       {
@@ -377,46 +350,61 @@ function buildClassCard(classEntry) {
           justifyContent: "center",
           minWidth: 0,
           flex: 1,
+          gap: "4px",
         },
       },
       h(
         "div",
         {
           style: {
-            color: "#ffffff",
-            fontSize: "18px",
-            fontWeight: 700,
-            lineHeight: 1.2,
-            whiteSpace: "nowrap",
-            overflow: "hidden",
-            textOverflow: "ellipsis",
+            display: "flex",
+            alignItems: "baseline",
+            gap: "8px",
+            minWidth: 0,
           },
         },
-        className,
+        h(
+          "span",
+          {
+            style: {
+              color: "#d9dce3",
+              fontSize: "23px",
+              fontWeight: 600,
+              lineHeight: 1.15,
+              whiteSpace: "nowrap",
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+            },
+          },
+          className,
+        ),
+        h(
+          "span",
+          {
+            style: {
+              color: "#d4af6a",
+              fontSize: "13px",
+              fontWeight: 700,
+              letterSpacing: "0.04em",
+              textTransform: "uppercase",
+              whiteSpace: "nowrap",
+            },
+          },
+          specName === "Awakening"
+            ? "AWK"
+            : specName === "Succession"
+              ? "SUCC"
+              : "ASC",
+        ),
       ),
       h(
         "div",
         {
           style: {
-            color: "#e4b655",
-            fontSize: "12px",
-            fontWeight: 700,
-            letterSpacing: "0.08em",
-            textTransform: "uppercase",
-            marginTop: "4px",
-            whiteSpace: "nowrap",
-          },
-        },
-        specName.toUpperCase(),
-      ),
-      h(
-        "div",
-        {
-          style: {
-            color: "#9ca3af",
-            fontSize: "13px",
-            fontWeight: 600,
-            marginTop: "6px",
+            color: "#878b99",
+            fontSize: "20px",
+            fontWeight: 400,
+            lineHeight: 1.15,
             whiteSpace: "nowrap",
           },
         },
@@ -426,79 +414,14 @@ function buildClassCard(classEntry) {
   );
 }
 
-function buildEmptyClassSlot(season) {
-  return h(
-    "div",
-    {
-      style: {
-        display: "flex",
-        alignItems: "center",
-        flex: 1,
-        height: "130px",
-        boxSizing: "border-box",
-        backgroundColor: "rgba(19, 21, 30, 0.5)",
-        border: "1px dashed #222636",
-        borderRadius: "14px",
-        padding: "16px 22px",
-        gap: "18px",
-      },
+function buildEmptyClassSlot() {
+  return h("div", {
+    style: {
+      display: "flex",
+      flex: 1,
+      minWidth: 0,
     },
-    h(
-      "div",
-      {
-        style: {
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "center",
-          width: "64px",
-          height: "64px",
-          borderRadius: "999px",
-          border: "2px dashed #282d40",
-          backgroundColor: "#0c0e14",
-          color: "#4b5563",
-          fontSize: "20px",
-          fontWeight: 800,
-          flexShrink: 0,
-        },
-      },
-      "—",
-    ),
-    h(
-      "div",
-      {
-        style: {
-          display: "flex",
-          flexDirection: "column",
-          justifyContent: "center",
-        },
-      },
-      h(
-        "div",
-        {
-          style: {
-            color: "#6b7280",
-            fontSize: "15px",
-            fontWeight: 700,
-          },
-        },
-        "No Extra Class",
-      ),
-      h(
-        "div",
-        {
-          style: {
-            color: "#4b5563",
-            fontSize: "12px",
-            fontWeight: 600,
-            letterSpacing: "0.06em",
-            textTransform: "uppercase",
-            marginTop: "4px",
-          },
-        },
-        `SEASON ${season || 9}`,
-      ),
-    ),
-  );
+  });
 }
 
 export function buildSolarePlayerOgTree(summary) {
@@ -544,6 +467,9 @@ export function buildSolarePlayerOgTree(summary) {
       : null;
 
   const portraitUri = getHeaderPortraitDataUri(primaryClassType);
+  const brandIconUri = loadPublicImageDataUri(
+    "/images/solare/solare-icon-game@4x.png",
+  );
 
   const tierInfo = hasRating ? getTierInfo(rating, ranking ?? 999) : null;
   const fallbackCrestPath = ranking
@@ -571,71 +497,56 @@ export function buildSolarePlayerOgTree(summary) {
           ]
         : [];
 
-  const nickUpper = nick.toUpperCase();
   const nickFontSize =
-    nickUpper.length > 18 ? "28px" : nickUpper.length > 13 ? "33px" : "38px";
-
-  const dotSeparator = h("div", {
-    style: {
-      width: "5px",
-      height: "5px",
-      borderRadius: "999px",
-      backgroundColor: "#6b7280",
-    },
-  });
-
-  const subtitleItems = [
-    h("span", { style: { color: "#38bdf8", fontWeight: 700 } }, region),
-  ];
-
-  if (primaryClassName) {
-    subtitleItems.push(dotSeparator);
-    subtitleItems.push(
-      h(
-        "span",
-        { style: { color: "#f3f4f6", fontWeight: 600 } },
-        `${primaryClassName} (${primarySpecName})`,
-      ),
-    );
-  }
-
-  if (classRanking && primaryClassName) {
-    subtitleItems.push(dotSeparator);
-    subtitleItems.push(
-      h(
-        "span",
-        { style: { color: "#fde08b", fontWeight: 700 } },
-        `Top #${classRanking} ${primaryClassName}`,
-      ),
-    );
-  }
-
-  subtitleItems.push(dotSeparator);
-  subtitleItems.push(
-    h(
-      "span",
-      { style: { color: "#9ca3af", fontWeight: 400 } },
-      "Arena of Solare",
-    ),
-  );
-
-  if (!classRanking) {
-    subtitleItems.push(dotSeparator);
-    subtitleItems.push(
-      h(
-        "span",
-        { style: { color: "#9ca3af", fontWeight: 400 } },
-        "Black Desert",
-      ),
-    );
-  }
+    nick.length > 18 ? "36px" : nick.length > 13 ? "42px" : "48px";
+  const tagFontSize =
+    nick.length > 18 ? "34px" : nick.length > 13 ? "38px" : "44px";
 
   const kdRatio =
     summary?.kd_ratio !== undefined && summary?.kd_ratio !== null
       ? Number(summary.kd_ratio)
       : null;
 
-  const showKdInSubcaption = kdRatio !== null && (hasRating || ranking);
+  const pillBadge =
+    classRanking && primaryClassName
+      ? {
+          text: `Top #${classRanking}`,
+          bg: "#d4af6a",
+          color: "#15161c",
+        }
+      : ranking
+        ? {
+            text: `Rank #${ranking}`,
+            bg: "#d4af6a",
+            color: "#15161c",
+          }
+        : {
+            text: `S${season}`,
+            bg: "#2d3140",
+            color: "#d1d5db",
+          };
+
+  const headlineLeft = tierInfo
+    ? formatTierHeadline(tierInfo.name)
+    : ranking
+      ? `Top 100 ${region}`
+      : `Season ${season}`;
+
+  const headlineRight = hasRating
+    ? `${rating.toLocaleString("en-US")} PTS`
+    : ranking
+      ? `#${ranking} ${region}`
+      : kdRatio !== null
+        ? `${kdRatio.toFixed(2)} K/D`
+        : `${wins}W ${losses}L`;
+
+  const recordParts = [`${wins}W / ${losses}L`];
+  if (draws > 0) {
+    recordParts[0] += ` / ${draws}D`;
+  }
+  if (kdRatio !== null && (hasRating || ranking)) {
+    recordParts.push(`${kdRatio.toFixed(2)} K/D`);
+  }
 
   return h(
     "div",
@@ -643,50 +554,26 @@ export function buildSolarePlayerOgTree(summary) {
       style: {
         display: "flex",
         flexDirection: "column",
-        justifyContent: "space-between",
+        justifyContent: "center",
         position: "relative",
         width: "100%",
         height: "100%",
         boxSizing: "border-box",
-        backgroundColor: "#0f1117",
-        padding: "44px 52px",
+        backgroundColor: "#181920",
+        padding: "72px 80px",
+        gap: "30px",
         fontFamily: "Inter",
         overflow: "hidden",
-        border: "1px solid #1e2230",
       },
     },
-    // Top-left gold ambient glow
-    h("div", {
-      style: {
-        position: "absolute",
-        top: "-120px",
-        left: "-90px",
-        width: "480px",
-        height: "320px",
-        backgroundImage:
-          "radial-gradient(circle, rgba(228, 182, 85, 0.13) 0%, rgba(56, 189, 248, 0.04) 48%, rgba(15, 17, 23, 0) 70%)",
-      },
-    }),
-    // Bottom-right cyan/gold ambient glow
-    h("div", {
-      style: {
-        position: "absolute",
-        bottom: "-120px",
-        right: "-90px",
-        width: "480px",
-        height: "320px",
-        backgroundImage:
-          "radial-gradient(circle, rgba(56, 189, 248, 0.10) 0%, rgba(228, 182, 85, 0.04) 48%, rgba(15, 17, 23, 0) 70%)",
-      },
-    }),
 
-    // 1. TOP HEADER SECTION
+    // 1. TOP HEADER SECTION (OP.GG Proportions)
     h(
       "div",
       {
         style: {
           display: "flex",
-          alignItems: "center",
+          alignItems: "flex-start",
           justifyContent: "space-between",
           width: "100%",
           boxSizing: "border-box",
@@ -698,40 +585,41 @@ export function buildSolarePlayerOgTree(summary) {
           style: {
             display: "flex",
             alignItems: "center",
-            gap: "22px",
+            gap: "28px",
             minWidth: 0,
+            flex: 1,
           },
         },
-        // 82x82 Gold-framed Portrait
+        // 108x108 Portrait
         h(
           "div",
           {
             style: {
               display: "flex",
               position: "relative",
-              width: "82px",
-              height: "82px",
-              borderRadius: "16px",
+              width: "108px",
+              height: "108px",
+              borderRadius: "20px",
               overflow: "hidden",
-              backgroundColor: "#08090c",
-              border: "2px solid #c99c3e",
+              backgroundColor: "#101116",
+              border: "2px solid rgba(212, 175, 106, 0.65)",
               flexShrink: 0,
             },
           },
           portraitUri
             ? h("img", {
                 src: portraitUri,
-                width: 82,
-                height: 82,
+                width: 108,
+                height: 108,
                 style: {
-                  width: "82px",
-                  height: "82px",
+                  width: "108px",
+                  height: "108px",
                   objectFit: "cover",
                 },
               })
             : null,
         ),
-        // Name + Rank Pill + Subtitle
+        // Original-case Nickname + #Rank/Region + Pill Subtitle
         h(
           "div",
           {
@@ -739,7 +627,8 @@ export function buildSolarePlayerOgTree(summary) {
               display: "flex",
               flexDirection: "column",
               justifyContent: "center",
-              gap: "8px",
+              gap: "12px",
+              minWidth: 0,
             },
           },
           h(
@@ -747,8 +636,9 @@ export function buildSolarePlayerOgTree(summary) {
             {
               style: {
                 display: "flex",
-                alignItems: "center",
+                alignItems: "baseline",
                 gap: "14px",
+                minWidth: 0,
               },
             },
             h(
@@ -757,17 +647,42 @@ export function buildSolarePlayerOgTree(summary) {
                 style: {
                   color: "#ffffff",
                   fontSize: nickFontSize,
-                  fontWeight: 900,
-                  letterSpacing: "0.03em",
-                  lineHeight: 1,
-                  maxWidth: "480px",
+                  fontWeight: 800,
+                  letterSpacing: "-0.01em",
+                  lineHeight: 1.05,
+                  maxWidth: "560px",
                   whiteSpace: "nowrap",
                   overflow: "hidden",
                   textOverflow: "ellipsis",
                 },
               },
-              nickUpper,
+              nick,
             ),
+            h(
+              "div",
+              {
+                style: {
+                  color: "#6f7382",
+                  fontSize: tagFontSize,
+                  fontWeight: 700,
+                  letterSpacing: "-0.01em",
+                  lineHeight: 1.05,
+                  whiteSpace: "nowrap",
+                },
+              },
+              ranking ? `#${ranking}` : `#${region}`,
+            ),
+          ),
+          h(
+            "div",
+            {
+              style: {
+                display: "flex",
+                alignItems: "center",
+                gap: "12px",
+                fontSize: "21px",
+              },
+            },
             h(
               "div",
               {
@@ -775,218 +690,128 @@ export function buildSolarePlayerOgTree(summary) {
                   display: "flex",
                   alignItems: "center",
                   justifyContent: "center",
-                  padding: "7px 14px",
-                  borderRadius: "11px",
-                  backgroundColor: "#272b38",
-                  border: "1px solid rgba(255, 255, 255, 0.12)",
-                  color: ranking ? "#fde08b" : "#9ca3af",
-                  fontSize: "18px",
-                  fontWeight: 900,
-                  letterSpacing: "0.05em",
-                  lineHeight: 1,
+                  backgroundColor: pillBadge.bg,
+                  color: pillBadge.color,
+                  fontSize: "15px",
+                  fontWeight: 800,
+                  padding: "4px 11px",
+                  borderRadius: "7px",
+                  lineHeight: 1.15,
                   whiteSpace: "nowrap",
                 },
               },
-              ranking ? `RANK #${ranking}` : `SEASON ${season}`,
+              pillBadge.text,
             ),
-          ),
-          h(
-            "div",
-            {
-              style: {
-                display: "flex",
-                alignItems: "center",
-                gap: "9px",
-                fontSize: "15px",
-                letterSpacing: "0.01em",
+            primaryClassName
+              ? h(
+                  "span",
+                  {
+                    style: {
+                      color: "#ffffff",
+                      fontWeight: 700,
+                      whiteSpace: "nowrap",
+                    },
+                  },
+                  `${primaryClassName} · ${primarySpecName}`,
+                )
+              : null,
+            h(
+              "span",
+              {
+                style: {
+                  color: "#878b99",
+                  fontWeight: 400,
+                  whiteSpace: "nowrap",
+                },
               },
-            },
-            ...subtitleItems,
+              `Arena of Solare · ${region}`,
+            ),
           ),
         ),
       ),
-      // Brand Watermark
+      // Top-Right Brand Mark (aligned like OP.GG logo)
       h(
         "div",
         {
           style: {
             display: "flex",
             alignItems: "center",
-            color: "#ffffff",
-            fontSize: "21px",
-            fontWeight: 900,
-            letterSpacing: "0.06em",
-            whiteSpace: "nowrap",
+            gap: "9px",
+            paddingTop: "6px",
             flexShrink: 0,
           },
         },
-        "DOWN-ATTACK.COM",
+        brandIconUri
+          ? h("img", {
+              src: brandIconUri,
+              width: 28,
+              height: 28,
+              style: {
+                width: "28px",
+                height: "28px",
+                objectFit: "contain",
+              },
+            })
+          : null,
+        h(
+          "span",
+          {
+            style: {
+              color: "#ffffff",
+              fontSize: "23px",
+              fontWeight: 900,
+              letterSpacing: "0.04em",
+              whiteSpace: "nowrap",
+            },
+          },
+          "DOWN ATTACK",
+        ),
       ),
     ),
 
-    // 2. MIDDLE RANK TIER & WINRATE CONTAINER
+    // 2. MIDDLE UNIFIED TIER & WINRATE BOX (OP.GG Style)
     h(
       "div",
       {
         style: {
           display: "flex",
           alignItems: "center",
-          justifyContent: "space-between",
           width: "100%",
-          height: "162px",
+          height: "210px",
           boxSizing: "border-box",
-          backgroundColor: "#161822",
-          border: "1px solid #2b3044",
-          borderRadius: "16px",
-          padding: "20px 32px",
+          backgroundColor: "#282933",
+          borderRadius: "20px",
+          padding: "28px 44px",
+          gap: "38px",
         },
       },
-      // Left: Tier Crest + Tier Name + Points
+      // Left: Tier Crest
       h(
         "div",
         {
           style: {
             display: "flex",
             alignItems: "center",
-            gap: "24px",
+            justifyContent: "center",
+            width: "126px",
+            height: "126px",
+            flexShrink: 0,
           },
         },
-        h(
-          "div",
-          {
-            style: {
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-              width: "108px",
-              height: "108px",
-              flexShrink: 0,
-            },
-          },
-          tierEmblemUri
-            ? h("img", {
-                src: tierEmblemUri,
-                width: 108,
-                height: 108,
-                style: {
-                  width: "108px",
-                  height: "108px",
-                  objectFit: "contain",
-                },
-              })
-            : null,
-        ),
-        h(
-          "div",
-          {
-            style: {
-              display: "flex",
-              flexDirection: "column",
-              justifyContent: "center",
-              gap: "8px",
-            },
-          },
-          h(
-            "div",
-            {
+        tierEmblemUri
+          ? h("img", {
+              src: tierEmblemUri,
+              width: 126,
+              height: 126,
               style: {
-                color: "#ffffff",
-                fontSize: "29px",
-                fontWeight: 800,
-                letterSpacing: "0.01em",
-                lineHeight: 1.15,
+                width: "126px",
+                height: "126px",
+                objectFit: "contain",
               },
-            },
-            tierInfo
-              ? formatTierHeadline(tierInfo.name)
-              : ranking
-                ? `Top 100 ${region}`
-                : `Season ${season} Contender`,
-          ),
-          hasRating
-            ? h(
-                "div",
-                {
-                  style: {
-                    display: "flex",
-                    alignItems: "baseline",
-                    gap: "10px",
-                  },
-                },
-                h(
-                  "span",
-                  {
-                    style: {
-                      color: "#f3c152",
-                      fontSize: "38px",
-                      fontWeight: 900,
-                      letterSpacing: "-0.01em",
-                      lineHeight: 1,
-                    },
-                  },
-                  rating.toLocaleString("en-US"),
-                ),
-                h(
-                  "span",
-                  {
-                    style: {
-                      color: "#d1d5db",
-                      fontSize: "19px",
-                      fontWeight: 700,
-                      letterSpacing: "0.05em",
-                      lineHeight: 1,
-                    },
-                  },
-                  "PTS",
-                ),
-              )
-            : h(
-                "div",
-                {
-                  style: {
-                    display: "flex",
-                    alignItems: "baseline",
-                    gap: "10px",
-                  },
-                },
-                h(
-                  "span",
-                  {
-                    style: {
-                      color: "#f3c152",
-                      fontSize: "36px",
-                      fontWeight: 900,
-                      lineHeight: 1,
-                    },
-                  },
-                  ranking
-                    ? `#${ranking}`
-                    : kdRatio !== null
-                      ? kdRatio.toFixed(2)
-                      : `${wins}W`,
-                ),
-                h(
-                  "span",
-                  {
-                    style: {
-                      color: "#d1d5db",
-                      fontSize: "18px",
-                      fontWeight: 700,
-                      letterSpacing: "0.05em",
-                      lineHeight: 1,
-                    },
-                  },
-                  ranking
-                    ? `${region} LADDER`
-                    : kdRatio !== null
-                      ? "K/D RATIO"
-                      : "SEASON RECORD",
-                ),
-              ),
-        ),
+            })
+          : null,
       ),
-
-      // Right: Win/Loss + Winrate + Progress Bar + Total Games
+      // Right: Full-width Tier+PTS header, Win/Loss bar, and Record+Winrate row
       h(
         "div",
         {
@@ -994,9 +819,11 @@ export function buildSolarePlayerOgTree(summary) {
             display: "flex",
             flexDirection: "column",
             justifyContent: "center",
-            width: "468px",
+            flex: 1,
+            minWidth: 0,
           },
         },
+        // Top Row: Tier Name <---> Points
         h(
           "div",
           {
@@ -1004,81 +831,49 @@ export function buildSolarePlayerOgTree(summary) {
               display: "flex",
               alignItems: "baseline",
               justifyContent: "space-between",
-              marginBottom: "11px",
+              width: "100%",
+              marginBottom: "18px",
             },
           },
           h(
-            "div",
+            "span",
             {
               style: {
-                display: "flex",
-                alignItems: "center",
-                gap: "8px",
-                fontSize: "20px",
-                fontWeight: 900,
+                color: "#ffffff",
+                fontSize: "38px",
+                fontWeight: 700,
+                letterSpacing: "-0.01em",
+                lineHeight: 1.1,
               },
             },
-            h("span", { style: { color: "#34d399" } }, `${wins}W`),
-            h("span", { style: { color: "#6b7280", fontWeight: 600 } }, "/"),
-            h("span", { style: { color: "#fb7185" } }, `${losses}L`),
-            draws > 0
-              ? [
-                  h(
-                    "span",
-                    { style: { color: "#6b7280", fontWeight: 600 } },
-                    "/",
-                  ),
-                  h("span", { style: { color: "#9ca3af" } }, `${draws}D`),
-                ]
-              : null,
+            headlineLeft,
           ),
           h(
-            "div",
+            "span",
             {
               style: {
-                display: "flex",
-                alignItems: "baseline",
-                gap: "8px",
+                color: "#ffffff",
+                fontSize: "38px",
+                fontWeight: 700,
+                letterSpacing: "-0.01em",
+                lineHeight: 1.1,
               },
             },
-            h(
-              "span",
-              {
-                style: {
-                  color: "#d1d5db",
-                  fontSize: "17px",
-                  fontWeight: 700,
-                },
-              },
-              "Win Rate",
-            ),
-            h(
-              "span",
-              {
-                style: {
-                  color: "#ffffff",
-                  fontSize: "25px",
-                  fontWeight: 900,
-                },
-              },
-              `${clampedWr.toFixed(1)}%`,
-            ),
+            headlineRight,
           ),
         ),
-        // Dual-tone Bar
+        // Middle Row: Full-width Dual-color Bar
         h(
           "div",
           {
             style: {
               display: "flex",
               width: "100%",
-              height: "20px",
-              boxSizing: "border-box",
-              backgroundColor: "#0c0f17",
+              height: "14px",
+              backgroundColor: "#1c1d25",
               borderRadius: "999px",
-              padding: "2px",
-              border: "1px solid rgba(255, 255, 255, 0.10)",
               overflow: "hidden",
+              marginBottom: "16px",
             },
           },
           totalGames > 0 && clampedWr > 0
@@ -1086,8 +881,7 @@ export function buildSolarePlayerOgTree(summary) {
                 style: {
                   width: `${clampedWr}%`,
                   height: "100%",
-                  backgroundImage:
-                    "linear-gradient(90deg, #06b6d4 0%, #38bdf8 100%)",
+                  backgroundColor: "#5383e8",
                   borderTopLeftRadius: "999px",
                   borderBottomLeftRadius: "999px",
                   borderTopRightRadius: clampedWr >= 100 ? "999px" : "0px",
@@ -1100,8 +894,7 @@ export function buildSolarePlayerOgTree(summary) {
                 style: {
                   width: `${100 - clampedWr}%`,
                   height: "100%",
-                  backgroundImage:
-                    "linear-gradient(90deg, #f43f5e 0%, #dc2626 100%)",
+                  backgroundColor: "#e84057",
                   borderTopRightRadius: "999px",
                   borderBottomRightRadius: "999px",
                   borderTopLeftRadius: clampedWr <= 0 ? "999px" : "0px",
@@ -1110,49 +903,28 @@ export function buildSolarePlayerOgTree(summary) {
               })
             : null,
         ),
-        // Sub-caption row
+        // Bottom Row: W/L (+ K/D) <---> Win Rate %
         h(
           "div",
           {
             style: {
               display: "flex",
               alignItems: "center",
-              justifyContent: showKdInSubcaption ? "space-between" : "flex-end",
-              marginTop: "10px",
-              fontSize: "13px",
-              color: "#9ca3af",
-              fontWeight: 600,
+              justifyContent: "space-between",
+              width: "100%",
+              fontSize: "24px",
+              color: "#999da9",
+              fontWeight: 400,
+              lineHeight: 1.15,
             },
           },
-          showKdInSubcaption
-            ? h(
-                "div",
-                {
-                  style: { display: "flex", alignItems: "center", gap: "5px" },
-                },
-                h("span", null, "Season K/D:"),
-                h(
-                  "span",
-                  { style: { color: "#f3f4f6", fontWeight: 700 } },
-                  kdRatio.toFixed(2),
-                ),
-              )
-            : null,
-          h(
-            "div",
-            { style: { display: "flex", alignItems: "center", gap: "5px" } },
-            h("span", null, "Total Solare Games:"),
-            h(
-              "span",
-              { style: { color: "#ffffff", fontWeight: 700 } },
-              String(totalGames),
-            ),
-          ),
+          h("span", null, recordParts.join("  ·  ")),
+          h("span", null, `Win Rate ${Math.round(clampedWr)}%`),
         ),
       ),
     ),
 
-    // 3. BOTTOM TOP 3 PLAYED CLASSES
+    // 3. BOTTOM TOP 3 PLAYED CLASSES (Clean Floating Row Like OP.GG)
     h(
       "div",
       {
@@ -1162,13 +934,14 @@ export function buildSolarePlayerOgTree(summary) {
           justifyContent: "space-between",
           width: "100%",
           boxSizing: "border-box",
-          gap: "16px",
+          padding: "0px 8px",
+          gap: "28px",
         },
       },
       ...[0, 1, 2].map((idx) =>
         topClasses[idx]
-          ? buildClassCard(topClasses[idx])
-          : buildEmptyClassSlot(season),
+          ? buildClassItem(topClasses[idx])
+          : buildEmptyClassSlot(),
       ),
     ),
   );

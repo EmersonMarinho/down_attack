@@ -1311,6 +1311,7 @@ const seoOgImageUrl = computed(() => {
     )
     .join("_");
   const versionKey = [
+    "v2",
     season,
     ranking,
     classRanking,
