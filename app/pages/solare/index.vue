@@ -177,7 +177,7 @@
 
         <!-- IN-GAME ACCURATE LEADERBOARD -->
         <div v-else class="overflow-x-auto">
-          <div class="min-w-[820px] flex flex-col gap-1.5">
+          <div class="min-w-[960px] flex flex-col gap-1.5">
             <!-- IN-GAME ACCURATE HEADER BAR -->
             <div
               class="grid grid-cols-12 items-center px-4 py-2.5 text-[#99907c] text-[12px] font-mono tracking-wider border-b border-[#4d4635]/30 mb-1 select-none"
@@ -223,7 +223,7 @@
             <div
               v-for="p in podiumPlayers"
               :key="`podium-${selectedRegion}-${p.user_no || p.user_nickname}`"
-              class="grid grid-cols-12 items-center px-4 py-2 min-h-[96px] relative overflow-hidden select-none cursor-pointer transition-all hover:brightness-110"
+              class="group grid grid-cols-12 items-center px-4 py-2 min-h-[96px] relative overflow-hidden select-none cursor-pointer transition-all hover:brightness-110"
               :class="{
                 'border border-[#9b783e]/60 shadow-2xl podium-rank-1':
                   p.rank === 1,
@@ -235,14 +235,14 @@
             >
               <div class="col-span-5 flex items-center gap-2.5 z-10 min-w-0">
                 <div
-                  class="relative flex items-center justify-center flex-shrink-0 w-20 h-20 -my-2"
+                  class="relative flex items-center justify-center flex-shrink-0 w-14 h-14 sm:w-16 sm:h-16 md:w-20 md:h-20 -my-2"
                   :title="p.tierInfo?.name"
                 >
                   <img
                     v-if="p.tierBadgeUrl"
                     :src="p.tierBadgeUrl"
                     :alt="p.tierInfo?.name || 'Solare Rank Medallion'"
-                    class="w-20 h-20 object-contain"
+                    class="w-full h-full object-contain"
                     :class="{
                       'drop-shadow-[0_0_12px_rgba(242,202,80,0.6)]':
                         p.rank === 1,
@@ -255,7 +255,7 @@
                 </div>
 
                 <div
-                  class="flex items-baseline solare-serif text-3xl font-bold tracking-tight w-16 flex-shrink-0"
+                  class="flex items-baseline solare-serif text-2xl sm:text-3xl font-bold tracking-tight w-12 sm:w-14 md:w-16 flex-shrink-0"
                   :class="{
                     'text-[#f5d580]': p.rank === 1,
                     'text-slate-200': p.rank === 2,
@@ -263,19 +263,19 @@
                   }"
                 >
                   {{ p.rank
-                  }}<span class="text-base uppercase ml-0.5">{{
+                  }}<span class="text-sm sm:text-base uppercase ml-0.5">{{
                     p.ordinalSuffix
                   }}</span>
                 </div>
 
                 <div
-                  class="relative h-20 w-32 overflow-hidden flex-shrink-0 -my-2 flex items-center justify-center art-slice-mask"
+                  class="relative h-16 sm:h-20 w-28 sm:w-32 md:w-36 xl:w-40 overflow-hidden flex-shrink-0 -my-2 flex items-center justify-center art-slice-mask"
                 >
                   <img
-                    v-if="p.matchSlotUrl"
-                    :src="p.matchSlotUrl"
+                    v-if="p.portraitUrl"
+                    :src="p.portraitUrl"
                     :alt="p.className"
-                    class="w-full h-full object-cover object-top"
+                    class="w-full h-full object-cover object-center transition-transform duration-300 group-hover:scale-105"
                   />
                 </div>
 
@@ -365,7 +365,7 @@
               <div
                 v-for="(p, idx) in standardPlayers"
                 :key="`row-${selectedRegion}-${p.user_no || p.user_nickname}`"
-                class="grid grid-cols-12 items-center px-4 py-2 hover:bg-[#23252a] border border-[#2d2f36] transition-colors select-none cursor-pointer"
+                class="group grid grid-cols-12 items-center px-4 py-2 hover:bg-[#202228] border border-[#2d2f36] hover:border-[#4d515f] transition-all select-none cursor-pointer"
                 :class="idx % 2 === 0 ? 'bg-[#1b1c20]' : 'bg-[#17181c]'"
                 @click="goToPlayer(p.user_nickname)"
               >
@@ -378,6 +378,8 @@
                       v-if="p.tierBadgeUrl"
                       :src="p.tierBadgeUrl"
                       :alt="p.tierInfo?.name || 'Solare Rank Medal'"
+                      loading="lazy"
+                      decoding="async"
                       class="w-11 h-11 object-contain drop-shadow-[0_0_6px_rgba(189,199,218,0.4)]"
                     />
                   </div>
@@ -393,13 +395,15 @@
                   </div>
 
                   <div
-                    class="w-28 h-10 overflow-hidden flex-shrink-0 flex items-center art-slice-mask"
+                    class="w-32 h-10 overflow-hidden flex-shrink-0 flex items-center art-slice-mask"
                   >
                     <img
-                      v-if="p.matchSlotUrl"
-                      :src="p.matchSlotUrl"
+                      v-if="p.portraitUrl"
+                      :src="p.portraitUrl"
                       :alt="p.className"
-                      class="w-full h-full object-cover object-top"
+                      loading="lazy"
+                      decoding="async"
+                      class="w-full h-full object-cover object-center transition-transform duration-300 group-hover:scale-105"
                     />
                   </div>
 
@@ -407,6 +411,8 @@
                     v-if="p.branchIconUrl"
                     :src="p.branchIconUrl"
                     :alt="p.branchName"
+                    loading="lazy"
+                    decoding="async"
                     class="w-4 h-5 object-contain ml-1 flex-shrink-0"
                     :class="
                       p.branchName === 'Succession'
@@ -492,6 +498,7 @@ import {
   getClassAvatar,
   getClassIcon,
   getClassMatchSlot,
+  getClassPortrait,
   getSkillBranchIcon,
   getTierInfo,
 } from "~/utils/solareTier.js";
@@ -619,6 +626,8 @@ const decoratedRankingPlayers = computed(() =>
       branchName: getSkillBranch(p.class_type, p.skill_branch_type),
       avatarUrl: getClassAvatar(p.class_type),
       classIconUrl: getClassIcon(p.class_type),
+      portraitUrl:
+        getClassPortrait(p.class_type) || getClassMatchSlot(p.class_type),
       matchSlotUrl: getClassMatchSlot(p.class_type),
       branchIconUrl: getSkillBranchIcon(p.class_type, p.skill_branch_type),
       tierInfo,
@@ -762,15 +771,15 @@ onMounted(() => {
   mask-image: linear-gradient(
     to right,
     transparent 0%,
-    black 18%,
-    black 82%,
+    black 14%,
+    black 86%,
     transparent 100%
   );
   -webkit-mask-image: linear-gradient(
     to right,
     transparent 0%,
-    black 18%,
-    black 82%,
+    black 14%,
+    black 86%,
     transparent 100%
   );
 }

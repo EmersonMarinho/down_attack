@@ -35,9 +35,24 @@ async function runPendingMigrations() {
   await migrator.runPendingMigrations();
 }
 
+let userSequence = 0;
+
+function generateUniqueUsername(sequence) {
+  const base =
+    faker.internet
+      .username()
+      .replace(/[^a-zA-Z0-9]/g, "")
+      .slice(0, 16) || "user";
+  const suffix = `${sequence}${faker.string.alphanumeric(6)}`.toLowerCase();
+
+  return `${base}.${suffix}`;
+}
+
 async function createUser(username) {
-  const fakeUsername = username ? username : faker.internet.username();
-  const fakeUserId = faker.string.numeric(18);
+  userSequence += 1;
+  const sequence = userSequence;
+  const fakeUsername = username ? username : generateUniqueUsername(sequence);
+  const fakeUserId = `${faker.string.numeric({ length: 12, allowLeadingZeros: false })}${String(sequence).padStart(6, "0")}`;
   const fakeAvatar = faker.string.alphanumeric(32);
 
   const userObject = {
