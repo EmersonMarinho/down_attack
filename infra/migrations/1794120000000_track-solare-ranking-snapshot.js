@@ -77,11 +77,12 @@ exports.up = (pgm) => {
   pgm.sql(`
     CREATE OR REPLACE FUNCTION fn_reconcile_solare_monotonic_ratings(
       p_region VARCHAR,
-      p_season SMALLINT DEFAULT 9
+      p_season SMALLINT DEFAULT NULL
     )
     RETURNS INTEGER AS $$
     DECLARE
-      v_target_season SMALLINT := COALESCE(p_season, 9)::smallint;
+      v_target_season SMALLINT;
+      v_unseeded RECORD;
       v_user_nos BIGINT[];
       v_nicks VARCHAR[];
       v_ranks INTEGER[];
@@ -104,6 +105,17 @@ exports.up = (pgm) => {
       i INTEGER;
       j INTEGER;
     BEGIN
+      v_target_season := COALESCE(
+        p_season,
+        (
+          SELECT MAX(COALESCE(sp_s.season, 9))::smallint
+          FROM solare_players sp_s
+          WHERE sp_s.region = p_region
+            AND sp_s.current_ranking IS NOT NULL
+        ),
+        9
+      );
+
       -- 1. Clear stale duplicate current_ranking < 999 where a newer snapshot holds the same rank
       WITH active_holders AS (
         SELECT DISTINCT ON (sp.current_ranking)
@@ -134,6 +146,48 @@ exports.up = (pgm) => {
           (sp.user_no IS NOT NULL AND ah.user_no IS NOT NULL AND sp.user_no <> ah.user_no)
           OR ((sp.user_no IS NULL OR ah.user_no IS NULL) AND LOWER(sp.user_nickname) <> LOWER(ah.user_nickname))
         );
+
+      -- 1.5 Re-infer unseeded/estimated players using newly proven Practice exclusions & neighbor bounds
+      FOR v_unseeded IN
+        SELECT
+          sp_u.region,
+          sp_u.user_no,
+          sp_u.user_nickname
+        FROM solare_players sp_u
+        WHERE sp_u.region = p_region
+          AND sp_u.rating_anchor_record_no IS NULL
+          AND sp_u.current_ranking IS NOT NULL
+          AND sp_u.current_ranking >= 1
+          AND (sp_u.season = v_target_season OR (v_target_season = 9 AND sp_u.season IS NULL))
+          AND (
+            sp_u.rank_rating IS NULL
+            OR sp_u.rating_is_estimated = TRUE
+            OR EXISTS (
+              SELECT 1
+              FROM solare_player_rating_events e
+              WHERE e.region = sp_u.region
+                AND e.user_no = sp_u.user_no
+                AND e.event_type = 'inferred_start'
+                AND COALESCE(e.season, 9) = COALESCE(sp_u.season, 9)
+                AND e.id > COALESCE((
+                  SELECT MAX(ep.id)
+                  FROM solare_player_rating_events ep
+                  WHERE ep.region = sp_u.region
+                    AND ep.user_no = sp_u.user_no
+                    AND ep.event_type IN ('season_reset', 'seed_anchor', 'reconcile', 'decay')
+                ), 0)
+            )
+          )
+        ORDER BY
+          sp_u.current_ranking ASC,
+          sp_u.updated_at DESC
+      LOOP
+        PERFORM fn_infer_unseeded_solare_player_rating(
+          v_unseeded.region,
+          v_unseeded.user_no,
+          v_unseeded.user_nickname
+        );
+      END LOOP;
 
       -- 2. Collect synchronized ranked players ordered by official current_ranking ASC
       SELECT
@@ -315,6 +369,132 @@ exports.up = (pgm) => {
     END;
     $$ LANGUAGE plpgsql;
 
+    DROP FUNCTION IF EXISTS fn_refresh_solare_practice_suspects(VARCHAR, BIGINT);
+    DROP FUNCTION IF EXISTS fn_refresh_solare_practice_suspects(VARCHAR, BIGINT, BOOLEAN);
+
+    CREATE OR REPLACE FUNCTION fn_refresh_solare_practice_suspects(
+      p_region VARCHAR,
+      p_min_record_no BIGINT DEFAULT 0,
+      p_auto_reconcile BOOLEAN DEFAULT TRUE
+    )
+    RETURNS INTEGER AS $$
+    DECLARE
+      v_inserted INTEGER;
+    BEGIN
+      DELETE FROM solare_practice_suspect_matches
+      WHERE region = p_region
+        AND record_no >= COALESCE(p_min_record_no, 0);
+
+      WITH room_stats AS (
+        SELECT
+          m.record_no,
+          m.match_date,
+          NULLIF(TRIM(m.repz_download_url), '') IS NOT NULL AS has_repz,
+          BOOL_OR(mp.is_winner) AS has_winner,
+          COUNT(*) FILTER (
+            WHERE mp.vary_rank_rating IS NOT NULL
+              AND mp.vary_rank_rating <> 0
+              AND ABS(mp.vary_rank_rating) <> 35
+          ) AS valid_pdl_count,
+          MAX(ABS(mp.vary_rank_rating)) FILTER (
+            WHERE mp.vary_rank_rating IS NOT NULL
+              AND mp.vary_rank_rating <> 0
+              AND ABS(mp.vary_rank_rating) <> 35
+          ) AS max_abs_pdl
+        FROM solare_matches m
+        JOIN solare_match_players mp
+          ON mp.region = m.region AND mp.record_no = m.record_no
+        WHERE m.region = p_region
+        GROUP BY m.record_no, m.match_date, m.repz_download_url
+      ),
+      repz_intervals AS (
+        SELECT
+          record_no AS prev_repz,
+          match_date AS prev_date,
+          LEAD(record_no) OVER (ORDER BY record_no) AS next_repz,
+          LEAD(match_date) OVER (ORDER BY record_no) AS next_date
+        FROM room_stats
+        WHERE has_repz
+      ),
+      overnight_gap AS (
+        SELECT rs.record_no, 'overnight_gap'::varchar(32) AS reason
+        FROM room_stats rs
+        JOIN repz_intervals ri
+          ON rs.record_no > ri.prev_repz
+         AND rs.record_no < ri.next_repz
+        WHERE NOT rs.has_repz
+          AND ri.next_date - ri.prev_date >= INTERVAL '6 hours'
+      ),
+      low_pdl_room AS (
+        SELECT record_no, 'low_pdl_room'::varchar(32) AS reason
+        FROM room_stats
+        WHERE NOT has_repz
+          AND has_winner
+          AND valid_pdl_count >= 3
+          AND max_abs_pdl <= 15
+      ),
+      team_keys AS (
+        SELECT
+          mp.record_no,
+          mp.team,
+          STRING_AGG(LOWER(mp.user_nickname), '|' ORDER BY LOWER(mp.user_nickname)) AS team_key,
+          COUNT(*) AS team_size
+        FROM solare_match_players mp
+        JOIN room_stats rs
+          ON rs.record_no = mp.record_no
+        WHERE mp.region = p_region
+          AND NOT rs.has_repz
+        GROUP BY mp.record_no, mp.team
+      ),
+      premade_trio AS (
+        SELECT DISTINCT a.record_no, 'premade_trio'::varchar(32) AS reason
+        FROM team_keys a
+        JOIN team_keys b
+          ON b.team_key = a.team_key
+         AND b.record_no <> a.record_no
+         AND ABS(b.record_no - a.record_no) <= 300
+        WHERE a.team_size = 3
+          AND b.team_size = 3
+      ),
+      math_proof AS (
+        SELECT record_no, 'math_proof'::varchar(32) AS reason
+        FROM solare_match_mode_proofs
+        WHERE region = p_region AND mode = 'practice'
+      ),
+      all_suspects AS (
+        SELECT record_no, reason FROM math_proof
+        UNION ALL
+        SELECT record_no, reason FROM low_pdl_room
+        UNION ALL
+        SELECT record_no, reason FROM premade_trio
+        UNION ALL
+        SELECT record_no, reason FROM overnight_gap
+      )
+      INSERT INTO solare_practice_suspect_matches (region, record_no, reason)
+      SELECT p_region, record_no, reason
+      FROM all_suspects s
+      WHERE s.record_no >= COALESCE(p_min_record_no, 0)
+        AND NOT EXISTS (
+          SELECT 1
+          FROM solare_match_mode_proofs pr
+          WHERE pr.region = p_region
+            AND pr.record_no = s.record_no
+            AND pr.mode = 'ranked'
+        )
+      ON CONFLICT (region, record_no) DO NOTHING;
+
+      GET DIAGNOSTICS v_inserted = ROW_COUNT;
+
+      -- When invoked by solare-crawler at the end of a region's daily Ranked window (runEndOfDayBackfill),
+      -- automatically reconcile the region's leaderboard ratings against the fresh GetRankList snapshot.
+      IF COALESCE(p_auto_reconcile, TRUE) THEN
+        PERFORM fn_reconcile_solare_monotonic_ratings(p_region, NULL);
+      END IF;
+
+      RETURN v_inserted;
+    END;
+    $$ LANGUAGE plpgsql;
+
     DO $$
     DECLARE
       v_reg RECORD;
@@ -335,6 +515,24 @@ exports.up = (pgm) => {
 
 exports.down = (pgm) => {
   pgm.sql(`
+    DROP FUNCTION IF EXISTS fn_refresh_solare_practice_suspects(VARCHAR, BIGINT, BOOLEAN);
+
+    CREATE OR REPLACE FUNCTION fn_refresh_solare_practice_suspects(
+      p_region VARCHAR,
+      p_min_record_no BIGINT DEFAULT 0
+    )
+    RETURNS INTEGER AS $$
+    DECLARE
+      v_inserted INTEGER;
+    BEGIN
+      DELETE FROM solare_practice_suspect_matches
+      WHERE region = p_region
+        AND record_no >= COALESCE(p_min_record_no, 0);
+
+      RETURN 0;
+    END;
+    $$ LANGUAGE plpgsql;
+
     DROP FUNCTION IF EXISTS fn_reconcile_solare_monotonic_ratings(VARCHAR, SMALLINT);
     DROP TRIGGER IF EXISTS trg_solare_player_track_ranking_snapshot ON solare_players;
     DROP FUNCTION IF EXISTS fn_trg_solare_player_track_ranking_snapshot();

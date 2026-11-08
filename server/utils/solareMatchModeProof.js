@@ -1272,7 +1272,7 @@ export async function proveRegionMatchModes({ region, season } = {}) {
   });
 
   const refreshResult = await database.query({
-    text: `SELECT fn_refresh_solare_practice_suspects($1, 0) AS refreshed_count;`,
+    text: `SELECT fn_refresh_solare_practice_suspects($1, 0, FALSE) AS refreshed_count;`,
     values: [targetRegion],
   });
 

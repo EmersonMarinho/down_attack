@@ -1931,6 +1931,26 @@ describe("Solare Continuous Elo Rating Engine", () => {
       expect(byNick.MikaS10).toEqual({ rank: 92, rating: 1866 });
       // LiveClimberS10 (#250 with post-snapshot match) kept its live 1950 rating!
       expect(byNick.LiveClimberS10).toEqual({ rank: 250, rating: 1950 });
+
+      // Simulate solare-crawler's end-of-day regional window hook:
+      // Reset BonelliS10 (#18) back to 2151 and AhaiS10 (#90) back to 1844, then call fn_refresh_solare_practice_suspects('SA', 0)
+      await database.query({
+        text: `
+          UPDATE solare_players
+          SET rank_rating = CASE WHEN user_no = 910018 THEN 2151 ELSE 1844 END
+          WHERE region = 'SA' AND user_no IN (910018, 910090);
+        `,
+      });
+      await database.query({
+        text: "SELECT fn_refresh_solare_practice_suspects('SA', 0);",
+      });
+      const crawlerHookCheck = await database.query({
+        text: "SELECT user_nickname, rank_rating FROM solare_players WHERE region = 'SA' AND user_no IN (910018, 910090) ORDER BY user_no ASC;",
+      });
+      expect(crawlerHookCheck.rows).toEqual([
+        { user_nickname: "BonelliS10", rank_rating: 2111 },
+        { user_nickname: "AhaiS10", rank_rating: 1867 },
+      ]);
     });
   });
 });
