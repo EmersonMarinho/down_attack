@@ -7,7 +7,7 @@ export default controller.handle({
     if (accessToken?.startsWith("Bearer mocked_user_")) {
       const parts = accessToken.split("_");
       const discordId = parts[2];
-      const customUsername = parts[3];
+      const customUsername = parts.slice(3).join("_");
 
       return UserObject(discordId, customUsername);
     }
@@ -25,8 +25,19 @@ export default controller.handle({
     //         "public_flags": 131072
     //     }
 
+    function generateMockUsername() {
+      const base =
+        faker.internet
+          .username()
+          .replace(/[^a-zA-Z0-9]/g, "")
+          .slice(0, 20) || "discorduser";
+      const suffix = faker.string.alphanumeric(6).toLowerCase();
+
+      return `${base}.${suffix}`;
+    }
+
     async function UserObject(discord_id, username) {
-      const fakeUsername = username ? username : faker.internet.username();
+      const fakeUsername = username ? username : generateMockUsername();
       const fakeUserId = discord_id ? discord_id : "268473310986240001";
       const fakeAvatar = "f749bb0cbeeb26ef21eca719337d20f1";
 

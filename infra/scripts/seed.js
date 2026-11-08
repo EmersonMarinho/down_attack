@@ -3,8 +3,9 @@ import fsp from "node:fs/promises";
 import path from "node:path";
 import dotenv from "dotenv";
 import dotenvExpand from "dotenv-expand";
-import { runner } from "node-pg-migrate";
 import database from "../database.js";
+import { runMigrationsWithClient } from "../migrator.js";
+import { seedSolareRatingAnchors } from "./seed-solare-rating-anchors.js";
 
 if (fs.existsSync(".env")) {
   dotenvExpand.expand(dotenv.config());
@@ -43,12 +44,7 @@ async function runSeed() {
 
   try {
     console.log("🔄 Running pending migrations before seed...");
-    await runner({
-      dir: path.resolve("infra", "migrations"),
-      direction: "up",
-      log: () => {},
-      migrationsTable: "pgmigrations",
-      dbClient: client,
+    await runMigrationsWithClient(client, {
       dryRun: false,
     });
 
@@ -286,6 +282,11 @@ async function runSeed() {
       );
     }
 
+    await seedSolareRatingAnchors({
+      client,
+      force: false,
+    });
+
     await client.query("COMMIT;");
 
     const duration = ((Date.now() - startTime) / 1000).toFixed(2);
@@ -293,9 +294,10 @@ async function runSeed() {
       `🚀 Success! ${skillsData.length} skills, ${allHits.length} hits, and ${presetsData.length} presets synchronized to the database in ${duration}s!`,
     );
   } catch (error) {
-    await client.query("ROLLBACK;");
+    await client.query("ROLLBACK;").catch(() => {});
     throw error;
   } finally {
+    await client.query("SELECT pg_advisory_unlock_all();").catch(() => {});
     await client.end();
   }
 }

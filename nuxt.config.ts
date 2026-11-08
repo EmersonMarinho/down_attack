@@ -35,6 +35,63 @@ export default defineNuxtConfig({
         );
         mkdirSync(jitiDest, { recursive: true });
         cpSync(babelSrc, join(jitiDest, "babel.cjs"));
+
+        // 3. Copia os assets necessários para o gerador de OG Image do Solare (Satori + resvg-wasm)
+        const ogImageAssetDirs = [
+          ["public", "images", "solare", "classes"],
+          ["public", "images", "solare", "tiers"],
+          ["public", "images", "solare", "game", "avatars"],
+        ];
+        for (const segments of ogImageAssetDirs) {
+          const srcDir = resolve(...segments);
+          const destDir = join(nitro.options.output.serverDir, ...segments);
+          cpSync(srcDir, destDir, { recursive: true });
+        }
+
+        const solareIconRel = [
+          "public",
+          "images",
+          "solare",
+          "solare-icon-game@4x.png",
+        ];
+        cpSync(
+          resolve(...solareIconRel),
+          join(nitro.options.output.serverDir, ...solareIconRel),
+        );
+
+        const ogFontsDest = join(
+          nitro.options.output.serverDir,
+          "assets",
+          "og-fonts",
+        );
+        mkdirSync(ogFontsDest, { recursive: true });
+        const ogFontFiles = [
+          "inter-latin-400-normal.woff",
+          "inter-latin-600-normal.woff",
+          "inter-latin-700-normal.woff",
+          "inter-latin-800-normal.woff",
+          "inter-latin-900-normal.woff",
+          "inter-latin-ext-600-normal.woff",
+          "inter-latin-ext-700-normal.woff",
+          "inter-latin-ext-900-normal.woff",
+          "inter-cyrillic-700-normal.woff",
+          "inter-cyrillic-900-normal.woff",
+        ];
+        for (const fontFile of ogFontFiles) {
+          const fontSrc = require.resolve(
+            `@fontsource/inter/files/${fontFile}`,
+          );
+          cpSync(fontSrc, join(ogFontsDest, fontFile));
+        }
+
+        const resvgDest = join(
+          nitro.options.output.serverDir,
+          "assets",
+          "resvg",
+        );
+        mkdirSync(resvgDest, { recursive: true });
+        const wasmSrc = require.resolve("@resvg/resvg-wasm/index_bg.wasm");
+        cpSync(wasmSrc, join(resvgDest, "index_bg.wasm"));
       });
     },
   },
@@ -65,7 +122,19 @@ export default defineNuxtConfig({
         },
         { name: "twitter:card", content: "summary" },
       ],
-      link: [{ rel: "icon", type: "image/x-icon", href: "/favicon.ico" }],
+      link: [
+        { rel: "icon", type: "image/x-icon", href: "/favicon.ico" },
+        { rel: "preconnect", href: "https://fonts.googleapis.com" },
+        {
+          rel: "preconnect",
+          href: "https://fonts.gstatic.com",
+          crossorigin: "",
+        },
+        {
+          rel: "stylesheet",
+          href: "https://fonts.googleapis.com/css2?family=Cinzel:wght@600;700&family=IBM+Plex+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500;600&display=swap",
+        },
+      ],
       script: [
         // Shows the skill details (tooltip) when hovering Bdolytics links
         { src: "https://bdolytics.com/tooltip/script.js", async: true },

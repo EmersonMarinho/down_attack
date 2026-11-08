@@ -35,9 +35,24 @@ async function runPendingMigrations() {
   await migrator.runPendingMigrations();
 }
 
+let userSequence = 0;
+
+function generateUniqueUsername(sequence) {
+  const base =
+    faker.internet
+      .username()
+      .replace(/[^a-zA-Z0-9]/g, "")
+      .slice(0, 16) || "user";
+  const suffix = `${sequence}${faker.string.alphanumeric(6)}`.toLowerCase();
+
+  return `${base}.${suffix}`;
+}
+
 async function createUser(username) {
-  const fakeUsername = username ? username : faker.internet.username();
-  const fakeUserId = faker.string.numeric(18);
+  userSequence += 1;
+  const sequence = userSequence;
+  const fakeUsername = username ? username : generateUniqueUsername(sequence);
+  const fakeUserId = `${faker.string.numeric({ length: 12, allowLeadingZeros: false })}${String(sequence).padStart(6, "0")}`;
   const fakeAvatar = faker.string.alphanumeric(32);
 
   const userObject = {
@@ -135,6 +150,7 @@ async function createCombo(comboObject, user) {
 async function createSolarePlayer(playerObject = {}) {
   const defaultPlayer = {
     region: "SA",
+    season: 9,
     user_no: 49934,
     user_nickname: "Shxtey",
     current_ranking: 1,
@@ -145,6 +161,11 @@ async function createSolarePlayer(playerObject = {}) {
     draw_count: 0,
     win_average: "59.34%",
     download_count: 3,
+    rank_rating: null,
+    rating_anchor_record_no: null,
+    rating_achieved_record_no: null,
+    rating_achieved_at: null,
+    last_decay_at: null,
   };
 
   const p = {
@@ -155,11 +176,14 @@ async function createSolarePlayer(playerObject = {}) {
   const result = await database.query({
     text: `
       INSERT INTO solare_players (
-        region, user_no, user_nickname, current_ranking, class_type,
+        region, season, user_no, user_nickname, current_ranking, class_type,
         skill_branch_type, win_count, lose_count, draw_count,
-        win_average, download_count, last_seen_at, updated_at
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NOW(), NOW())
+        win_average, download_count, rank_rating, rating_anchor_record_no,
+        rating_achieved_record_no, rating_achieved_at, last_decay_at,
+        last_seen_at, updated_at
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, NOW(), NOW())
       ON CONFLICT (region, user_no) DO UPDATE SET
+        season = EXCLUDED.season,
         user_nickname = EXCLUDED.user_nickname,
         current_ranking = EXCLUDED.current_ranking,
         class_type = EXCLUDED.class_type,
@@ -169,12 +193,18 @@ async function createSolarePlayer(playerObject = {}) {
         draw_count = EXCLUDED.draw_count,
         win_average = EXCLUDED.win_average,
         download_count = EXCLUDED.download_count,
+        rank_rating = EXCLUDED.rank_rating,
+        rating_anchor_record_no = EXCLUDED.rating_anchor_record_no,
+        rating_achieved_record_no = EXCLUDED.rating_achieved_record_no,
+        rating_achieved_at = EXCLUDED.rating_achieved_at,
+        last_decay_at = EXCLUDED.last_decay_at,
         last_seen_at = NOW(),
         updated_at = NOW()
       RETURNING *;
     `,
     values: [
       p.region,
+      p.season,
       p.user_no,
       p.user_nickname,
       p.current_ranking,
@@ -185,6 +215,11 @@ async function createSolarePlayer(playerObject = {}) {
       p.draw_count,
       p.win_average,
       p.download_count,
+      p.rank_rating,
+      p.rating_anchor_record_no,
+      p.rating_achieved_record_no,
+      p.rating_achieved_at,
+      p.last_decay_at,
     ],
   });
 
@@ -193,6 +228,7 @@ async function createSolarePlayer(playerObject = {}) {
 
 async function createSolareMatch(matchObject = {}) {
   const region = matchObject.region || "SA";
+  const season = matchObject.season ?? 9;
   const recordNo = matchObject.record_no ?? 920906;
   const targetNick = matchObject.user_nickname || "Shxtey";
   const targetUserNo = matchObject.user_no ?? 49934;
@@ -209,10 +245,11 @@ async function createSolareMatch(matchObject = {}) {
 
   const defaultMatch = {
     region,
+    season,
     record_no: recordNo,
     play_time_seconds: 227,
     win_record: targetIsWinner ? [2, 2, 2] : [3, 3, 3],
-    repz_download_url: `https://replay.pearlcdn.com/sa/sa/solare_8_${recordNo}_4b0d351e.repz`,
+    repz_download_url: `https://replay.pearlcdn.com/sa/sa/solare_${season - 1}_${recordNo}_4b0d351e.repz`,
     match_date: new Date().toISOString(),
   };
 
@@ -317,9 +354,10 @@ async function createSolareMatch(matchObject = {}) {
   const matchRes = await database.query({
     text: `
       INSERT INTO solare_matches (
-        region, record_no, play_time_seconds, win_record, repz_download_url, match_date, crawled_at
-      ) VALUES ($1, $2, $3, $4, $5, $6, NOW())
+        region, season, record_no, play_time_seconds, win_record, repz_download_url, match_date, crawled_at
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())
       ON CONFLICT (region, record_no) DO UPDATE SET
+        season = EXCLUDED.season,
         play_time_seconds = EXCLUDED.play_time_seconds,
         win_record = EXCLUDED.win_record,
         repz_download_url = EXCLUDED.repz_download_url,
@@ -328,6 +366,7 @@ async function createSolareMatch(matchObject = {}) {
     `,
     values: [
       m.region,
+      m.season,
       m.record_no,
       m.play_time_seconds,
       m.win_record,
