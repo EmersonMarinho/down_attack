@@ -1400,13 +1400,19 @@ async function resolvePlayerRankingPositions({
       : null;
   let activeClassRanking = null;
 
-  if (isPlayerRowForTargetSeason && playerRow.current_ranking !== null) {
+  if (
+    isPlayerRowForTargetSeason &&
+    (playerRow.current_ranking !== null ||
+      (playerRow.rank_rating !== null &&
+        playerRow.rank_rating !== undefined &&
+        !playerRow.rating_is_estimated))
+  ) {
     const rankingPositionResult = await database.query({
       text: `
         WITH deduplicated_ranking AS (
           SELECT DISTINCT ON (
             CASE
-              WHEN current_ranking < ${SOLARE_SHARED_RANK_FLOOR} THEN 'r:' || current_ranking::text
+              WHEN current_ranking IS NOT NULL AND current_ranking < ${SOLARE_SHARED_RANK_FLOOR} THEN 'r:' || current_ranking::text
               ELSE 'u:' || COALESCE(user_no::text, LOWER(user_nickname))
             END
           )
@@ -1421,15 +1427,35 @@ async function resolvePlayerRankingPositions({
             solare_players
           WHERE
             region = $1
-            AND current_ranking IS NOT NULL
-            AND current_ranking >= 1
+            AND (
+              (current_ranking IS NOT NULL AND current_ranking >= 1)
+              OR (rank_rating IS NOT NULL AND NOT COALESCE(rating_is_estimated, FALSE))
+            )
             AND (
               season = $2
               OR ($2 = 9 AND season IS NULL)
             )
+            AND NOT (
+              current_ranking IS NULL
+              AND EXISTS (
+                SELECT 1
+                FROM solare_players sp_dup
+                WHERE sp_dup.region = solare_players.region
+                  AND (sp_dup.season = $2 OR ($2 = 9 AND sp_dup.season IS NULL))
+                  AND sp_dup.current_ranking IS NOT NULL
+                  AND sp_dup.current_ranking >= 1
+                  AND (
+                    (solare_players.user_no IS NOT NULL AND sp_dup.user_no = solare_players.user_no)
+                    OR (
+                      (solare_players.user_no IS NULL OR sp_dup.user_no IS NULL)
+                      AND LOWER(sp_dup.user_nickname) = LOWER(solare_players.user_nickname)
+                    )
+                  )
+              )
+            )
           ORDER BY
             CASE
-              WHEN current_ranking < ${SOLARE_SHARED_RANK_FLOOR} THEN 'r:' || current_ranking::text
+              WHEN current_ranking IS NOT NULL AND current_ranking < ${SOLARE_SHARED_RANK_FLOOR} THEN 'r:' || current_ranking::text
               ELSE 'u:' || COALESCE(user_no::text, LOWER(user_nickname))
             END ASC,
             COALESCE(last_seen_at, updated_at) DESC NULLS LAST,
@@ -1766,7 +1792,8 @@ async function getPlayerSummary({ nick, region, countryCode, season } = {}) {
   const activeRankRating =
     isPlayerRowForTargetSeason &&
     playerRow?.rank_rating !== null &&
-    playerRow?.rank_rating !== undefined
+    playerRow?.rank_rating !== undefined &&
+    (playerRow.current_ranking !== null || !playerRow.rating_is_estimated)
       ? Number(playerRow.rank_rating)
       : null;
 
@@ -2182,7 +2209,8 @@ async function getPlayerProfile({
   const activeRankRating =
     isPlayerRowForTargetSeason &&
     playerRow?.rank_rating !== null &&
-    playerRow?.rank_rating !== undefined
+    playerRow?.rank_rating !== undefined &&
+    (playerRow.current_ranking !== null || !playerRow.rating_is_estimated)
       ? Number(playerRow.rank_rating)
       : null;
 
@@ -2282,7 +2310,7 @@ async function getRanking({ region, season, classType, headers } = {}) {
       WITH deduplicated_ranking AS (
         SELECT DISTINCT ON (
           CASE
-            WHEN current_ranking < ${SOLARE_SHARED_RANK_FLOOR} THEN 'r:' || current_ranking::text
+            WHEN current_ranking IS NOT NULL AND current_ranking < ${SOLARE_SHARED_RANK_FLOOR} THEN 'r:' || current_ranking::text
             ELSE 'u:' || COALESCE(user_no::text, LOWER(user_nickname))
           END
         )
@@ -2303,15 +2331,35 @@ async function getRanking({ region, season, classType, headers } = {}) {
           solare_players
         WHERE
           region = $1
-          AND current_ranking IS NOT NULL
-          AND current_ranking >= 1
+          AND (
+            (current_ranking IS NOT NULL AND current_ranking >= 1)
+            OR (rank_rating IS NOT NULL AND NOT COALESCE(rating_is_estimated, FALSE))
+          )
           AND (
             season = $2
             OR ($2 = 9 AND season IS NULL)
           )
+          AND NOT (
+            current_ranking IS NULL
+            AND EXISTS (
+              SELECT 1
+              FROM solare_players sp_dup
+              WHERE sp_dup.region = solare_players.region
+                AND (sp_dup.season = $2 OR ($2 = 9 AND sp_dup.season IS NULL))
+                AND sp_dup.current_ranking IS NOT NULL
+                AND sp_dup.current_ranking >= 1
+                AND (
+                  (solare_players.user_no IS NOT NULL AND sp_dup.user_no = solare_players.user_no)
+                  OR (
+                    (solare_players.user_no IS NULL OR sp_dup.user_no IS NULL)
+                    AND LOWER(sp_dup.user_nickname) = LOWER(solare_players.user_nickname)
+                  )
+                )
+            )
+          )
         ORDER BY
           CASE
-            WHEN current_ranking < ${SOLARE_SHARED_RANK_FLOOR} THEN 'r:' || current_ranking::text
+            WHEN current_ranking IS NOT NULL AND current_ranking < ${SOLARE_SHARED_RANK_FLOOR} THEN 'r:' || current_ranking::text
             ELSE 'u:' || COALESCE(user_no::text, LOWER(user_nickname))
           END ASC,
           COALESCE(last_seen_at, updated_at) DESC NULLS LAST,
@@ -2601,33 +2649,89 @@ async function applyInactivityDecay({ region, season, now } = {}) {
         sp.rank_rating,
         sp.last_decay_at,
         COALESCE(
-          (
-            SELECT MAX(COALESCE(m.match_date, m.crawled_at, mp.created_at))
-            FROM solare_match_players mp
-            LEFT JOIN solare_matches m
-              ON m.region = mp.region AND m.record_no = mp.record_no
-            WHERE
-              mp.region = sp.region
-              AND (
-                ($2::smallint IS NULL OR m.season = $2::smallint OR ($2::smallint = 9 AND m.season IS NULL))
+          CASE
+            WHEN latest_mp.raw_match_at IS NOT NULL THEN
+              LEAST(
+                latest_mp.raw_match_at,
+                COALESCE(
+                  (
+                    SELECT MIN(m_next.match_date)
+                    FROM (
+                      SELECT m2.match_date
+                      FROM solare_matches m2
+                      WHERE m2.region = sp.region
+                        AND m2.record_no > latest_mp.record_no
+                        AND m2.match_date IS NOT NULL
+                      ORDER BY m2.record_no ASC
+                      LIMIT 25
+                    ) m_next
+                  ),
+                  latest_mp.raw_match_at
+                )
               )
-              AND (
-                (sp.user_no IS NOT NULL AND mp.user_no = sp.user_no)
-                OR ((sp.user_no IS NULL OR mp.user_no IS NULL) AND LOWER(mp.user_nickname) = LOWER(sp.user_nickname))
-              )
-              AND NOT EXISTS (
-                SELECT 1
-                FROM solare_match_mode_proofs smp
-                WHERE smp.region = mp.region
-                  AND smp.record_no = mp.record_no
-                  AND smp.mode = 'practice'
-              )
-          ),
+            ELSE NULL
+          END,
           sp.rating_achieved_at,
           sp.last_seen_at
-        ) AS last_match_at
+        ) AS last_match_at,
+        latest_decay.id AS latest_decay_event_id,
+        latest_reset.id AS latest_reset_event_id,
+        latest_reset.event_type AS latest_reset_event_type,
+        latest_reset.created_at AS latest_reset_created_at,
+        latest_reset.metadata->>'snapshot_date' AS seed_snapshot_date,
+        COALESCE((latest_reset.metadata->>'extra_games_fast_forwarded')::int, 0) AS seed_extra_games
       FROM
         solare_players sp
+      LEFT JOIN LATERAL (
+        SELECT
+          mp.record_no,
+          COALESCE(m.match_date, m.crawled_at, mp.created_at) AS raw_match_at
+        FROM solare_match_players mp
+        LEFT JOIN solare_matches m
+          ON m.region = mp.region AND m.record_no = mp.record_no
+        WHERE
+          mp.region = sp.region
+          AND (
+            ($2::smallint IS NULL OR m.season = $2::smallint OR ($2::smallint = 9 AND m.season IS NULL))
+          )
+          AND (
+            (sp.user_no IS NOT NULL AND mp.user_no = sp.user_no)
+            OR (sp.user_no IS NULL AND LOWER(mp.user_nickname) = LOWER(sp.user_nickname))
+          )
+          AND NOT EXISTS (
+            SELECT 1
+            FROM solare_match_mode_proofs smp
+            WHERE smp.region = mp.region
+              AND smp.record_no = mp.record_no
+              AND smp.mode = 'practice'
+          )
+        ORDER BY mp.record_no DESC
+        LIMIT 1
+      ) latest_mp ON true
+      LEFT JOIN LATERAL (
+        SELECT ed.id
+        FROM solare_player_rating_events ed
+        WHERE ed.region = sp.region
+          AND (
+            (sp.user_no IS NOT NULL AND ed.user_no = sp.user_no)
+            OR (sp.user_no IS NULL AND LOWER(ed.user_nickname) = LOWER(sp.user_nickname))
+          )
+          AND ed.event_type = 'decay'
+        ORDER BY ed.id DESC
+        LIMIT 1
+      ) latest_decay ON true
+      LEFT JOIN LATERAL (
+        SELECT er.id, er.event_type, er.created_at, er.metadata
+        FROM solare_player_rating_events er
+        WHERE er.region = sp.region
+          AND (
+            (sp.user_no IS NOT NULL AND er.user_no = sp.user_no)
+            OR (sp.user_no IS NULL AND LOWER(er.user_nickname) = LOWER(sp.user_nickname))
+          )
+          AND er.event_type IN ('season_reset', 'seed_anchor', 'inferred_start', 'reconcile')
+        ORDER BY er.id DESC
+        LIMIT 1
+      ) latest_reset ON true
       WHERE
         sp.rank_rating IS NOT NULL
         AND NOT COALESCE(sp.rating_is_estimated, FALSE)
@@ -2647,7 +2751,7 @@ async function applyInactivityDecay({ region, season, now } = {}) {
     }
 
     const lastMatchMs = new Date(row.last_match_at).getTime();
-    const lastDecayMs = row.last_decay_at
+    const rawLastDecayMs = row.last_decay_at
       ? new Date(row.last_decay_at).getTime()
       : null;
     const nowMs = referenceDate.getTime();
@@ -2665,6 +2769,40 @@ async function applyInactivityDecay({ region, season, now } = {}) {
     const firstDecayThresholdMs = lastMatchMs + graceDays * MS_PER_DAY;
     if (nowMs < firstDecayThresholdMs) {
       continue;
+    }
+
+    let lastDecayMs = rawLastDecayMs;
+    const latestResetId = Number(row.latest_reset_event_id || 0);
+    const latestDecayId = Number(row.latest_decay_event_id || 0);
+
+    if (latestResetId > latestDecayId) {
+      if (
+        row.latest_reset_event_type === "seed_anchor" &&
+        Number(row.seed_extra_games || 0) === 0 &&
+        row.seed_snapshot_date
+      ) {
+        const snapshotMs = new Date(row.seed_snapshot_date).getTime();
+        lastDecayMs =
+          !Number.isNaN(snapshotMs) && snapshotMs >= firstDecayThresholdMs
+            ? snapshotMs
+            : null;
+      } else if (
+        row.latest_reset_event_type === "inferred_start" ||
+        row.latest_reset_event_type === "season_reset"
+      ) {
+        lastDecayMs = null;
+      } else if (
+        row.latest_reset_event_type === "reconcile" &&
+        row.latest_reset_created_at
+      ) {
+        const reconcileMs = new Date(row.latest_reset_created_at).getTime();
+        if (!Number.isNaN(reconcileMs)) {
+          lastDecayMs =
+            rawLastDecayMs !== null
+              ? Math.max(rawLastDecayMs, reconcileMs)
+              : reconcileMs;
+        }
+      }
     }
 
     let intervalsToApply;
@@ -2991,6 +3129,8 @@ async function reconcileRegionRatings({
         UPDATE solare_players sp
         SET
           current_ranking = NULL,
+          rank_rating = CASE WHEN COALESCE(sp.rating_is_estimated, FALSE) THEN NULL ELSE sp.rank_rating END,
+          rating_is_estimated = FALSE,
           updated_at = timezone('utc', now())
         FROM active_holders ah
         WHERE sp.region = $1

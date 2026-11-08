@@ -1952,5 +1952,150 @@ describe("Solare Continuous Elo Rating Engine", () => {
         { user_nickname: "AhaiS10", rank_rating: 1867 },
       ]);
     });
+
+    test("Inactive Top 100 players omitted from GetRankList (AtorPago #68) decay from seed_anchor snapshot_date and fill official ranking gaps without showing UNRANKED", async () => {
+      await database.query({
+        text: `
+          WITH del_events AS (
+            DELETE FROM solare_player_rating_events WHERE region = 'TW' AND season = 11
+          ),
+          del_mp AS (
+            DELETE FROM solare_match_players WHERE region = 'TW' AND record_no >= 990000
+          ),
+          del_m AS (
+            DELETE FROM solare_matches WHERE region = 'TW' AND season = 11
+          )
+          DELETE FROM solare_players WHERE region = 'TW' AND season = 11;
+        `,
+      });
+
+      // Active #67 (Incapacitate, 1912 PDL) and #69 (Tomazoni, 1909 PDL) in GetRankList (leaving #68 gap)
+      await orchestrator.createSolarePlayer({
+        region: "TW",
+        season: 11,
+        user_no: 73067,
+        user_nickname: "IncapacitateTW",
+        current_ranking: 1,
+        class_type: 20,
+        skill_branch_type: 1,
+        win_count: 50,
+        lose_count: 30,
+        rank_rating: 1912,
+        rating_anchor_record_no: 990100,
+        rating_achieved_record_no: 990100,
+      });
+
+      await orchestrator.createSolarePlayer({
+        region: "TW",
+        season: 11,
+        user_no: 73069,
+        user_nickname: "TomazoniTW",
+        current_ranking: 3,
+        class_type: 16,
+        skill_branch_type: 2,
+        win_count: 45,
+        lose_count: 28,
+        rank_rating: 1909,
+        rating_anchor_record_no: 990100,
+        rating_achieved_record_no: 990100,
+      });
+
+      // Inactive player AtorPagoTW: last played on 2026-10-29 (10 days before 2026-11-08),
+      // seeded on snapshot_date 2026-11-06 with 1940 PDL (4 decays from 2060 already baked in),
+      // and current_ranking = NULL because >7 days without a .repz replay omits him from GetRankList.
+      await orchestrator.createSolarePlayer({
+        region: "TW",
+        season: 11,
+        user_no: 73726,
+        user_nickname: "AtorPagoTW",
+        current_ranking: null,
+        class_type: 28,
+        skill_branch_type: 1,
+        win_count: 40,
+        lose_count: 10,
+        rank_rating: 1940,
+        rating_anchor_record_no: 990050,
+        rating_achieved_record_no: 990050,
+        rating_achieved_at: "2026-10-29T01:31:45.511Z",
+        last_decay_at: null,
+      });
+
+      await database.query({
+        text: `
+          INSERT INTO solare_player_rating_events (
+            region, season, user_no, user_nickname, record_no, event_type,
+            previous_rating, rating_delta, new_rating, metadata
+          )
+          VALUES (
+            'TW', 11, 73726, 'AtorPagoTW', 990050, 'seed_anchor',
+            NULL, 0, 1940,
+            jsonb_build_object(
+              'snapshot_date', '2026-11-06',
+              'base_anchor_rating', 1940,
+              'extra_games_fast_forwarded', 0
+            )
+          );
+        `,
+      });
+
+      // Evaluate decay on 2026-11-08T08:00:00Z (2 days after 2026-11-06 snapshot -> 1 interval of -30 -> 1910 PDL)
+      const sqlDecayRes = await database.query({
+        text: "SELECT fn_apply_solare_inactivity_decay('TW', 11::smallint, '2026-11-08T08:00:00Z'::timestamptz) AS decayed;",
+      });
+      expect(sqlDecayRes.rows[0].decayed).toBe(1);
+
+      // Re-running at the same timestamp is idempotent (both in SQL and JS)
+      const jsDecayRes = await solare.applyInactivityDecay({
+        region: "TW",
+        season: 11,
+        now: "2026-11-08T08:00:00Z",
+      });
+      expect(jsDecayRes.decayedCount).toBe(0);
+
+      // Ranking endpoint places AtorPagoTW (1910) at Rank #2 right between IncapacitateTW (#1, 1912) and TomazoniTW (#3, 1909)
+      const rankingRes = await fetch(
+        `${webserver.origin}/api/v1/solare/ranking?region=TW&season=11`,
+      );
+      expect(rankingRes.status).toBe(200);
+      const rankingBody = await rankingRes.json();
+      expect(
+        rankingBody.players.map((p) => ({
+          rank: p.rank,
+          official_ranking: p.official_ranking,
+          nick: p.user_nickname,
+          rating: p.rank_rating,
+        })),
+      ).toEqual([
+        {
+          rank: 1,
+          official_ranking: 1,
+          nick: "IncapacitateTW",
+          rating: 1912,
+        },
+        {
+          rank: 2,
+          official_ranking: null,
+          nick: "AtorPagoTW",
+          rating: 1910,
+        },
+        {
+          rank: 3,
+          official_ranking: 3,
+          nick: "TomazoniTW",
+          rating: 1909,
+        },
+      ]);
+
+      // Player profile & summary endpoints resolve AtorPagoTW's effective rank (#2) and class rank (#1) instead of null/UNRANKED
+      const summaryRes = await fetch(
+        `${webserver.origin}/api/v1/solare/player/summary?nick=AtorPagoTW&region=TW&season=11`,
+      );
+      expect(summaryRes.status).toBe(200);
+      const summaryBody = await summaryRes.json();
+      expect(summaryBody.rank_rating).toBe(1910);
+      expect(summaryBody.current_ranking).toBe(2);
+      expect(summaryBody.official_ranking).toBeNull();
+      expect(summaryBody.class_ranking).toBe(1);
+    });
   });
 });
