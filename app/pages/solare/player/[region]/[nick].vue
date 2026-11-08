@@ -102,7 +102,10 @@
                   {{
                     profile.current_ranking
                       ? `#${profile.current_ranking} ${profile.region}`
-                      : `UNRANKED ${profile.region}`
+                      : profile.rank_rating !== null &&
+                          profile.rank_rating !== undefined
+                        ? profile.region
+                        : `UNRANKED ${profile.region}`
                   }}
                 </span>
                 <span v-if="profile.class_ranking" class="solare-top-tag">

@@ -325,7 +325,25 @@ export async function seedSolareRatingAnchors(options = {}) {
                 (SELECT MAX(rm.record_no)::bigint FROM ranked_matches rm)
               ) AS achieved_record_no,
               (
-                SELECT rm.match_at
+                SELECT
+                  LEAST(
+                    rm.match_at,
+                    COALESCE(
+                      (
+                        SELECT MIN(m_next.match_date)
+                        FROM (
+                          SELECT m2.match_date
+                          FROM solare_matches m2
+                          WHERE m2.region = mp.region
+                            AND m2.record_no > rm.record_no
+                            AND m2.match_date IS NOT NULL
+                          ORDER BY m2.record_no ASC
+                          LIMIT 25
+                        ) m_next
+                      ),
+                      rm.match_at
+                    )
+                  )
                 FROM ranked_matches rm
                 ORDER BY rm.record_no DESC
                 LIMIT 1
@@ -339,6 +357,19 @@ export async function seedSolareRatingAnchors(options = {}) {
             rating_anchor_record_no = rw.final_anchor_watermark,
             rating_achieved_record_no = rw.achieved_record_no,
             rating_achieved_at = rw.achieved_at,
+            last_decay_at = CASE
+              WHEN $3::text IS NOT NULL
+                AND rw.extra_games_since_snapshot = 0
+                AND rw.effective_rating >= 1801
+                AND (($3::date)::timestamp AT TIME ZONE 'UTC') >= rw.achieved_at + (
+                  CASE
+                    WHEN rw.effective_rating >= 2101 THEN INTERVAL '2 days'
+                    ELSE INTERVAL '3 days'
+                  END
+                )
+                THEN (($3::date)::timestamp AT TIME ZONE 'UTC')
+              ELSE NULL
+            END,
             updated_at = timezone('utc', now())
           FROM resolved_watermarks rw
           WHERE sp.region = rw.region
@@ -393,6 +424,7 @@ export async function seedSolareRatingAnchors(options = {}) {
             )
           FROM updated_players up
           WHERE up.previous_rating IS DISTINCT FROM up.effective_rating
+            OR $4::boolean = true
           RETURNING id
         )
         SELECT
