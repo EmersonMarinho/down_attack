@@ -1385,6 +1385,105 @@ async function resolvePlayerIdentityAndSeason({
   };
 }
 
+// Most played class (and branch) for every row of a `deduplicated_ranking` CTE, computed set-based.
+// A per-row LATERAL subquery with an `user_no = x OR LOWER(nick) = y` predicate turned every ranking
+// lookup into one nested loop per ranked player (~7s for a full region). Here the season's non-practice
+// match players are aggregated once per (user_no, nickname, class, branch) and then joined twice:
+// by user_no when both sides have one, and by nickname when either side lacks it. Those two conditions
+// are mutually exclusive, so UNION ALL never double counts. Expects $1 = region and $2 = season.
+const RANKING_MOST_PLAYED_CLASS_CTES = `
+  ranking_players AS (
+    SELECT
+      ROW_NUMBER() OVER () AS dr_id,
+      dr.*
+    FROM
+      deduplicated_ranking dr
+  ),
+  season_class_counts AS (
+    SELECT
+      mp.user_no,
+      LOWER(mp.user_nickname) AS nick_lower,
+      mp.class_type,
+      mp.skill_branch_type,
+      COUNT(*)::int AS games,
+      COUNT(*) FILTER (WHERE mp.is_winner IS TRUE)::int AS wins
+    FROM
+      solare_match_players mp
+    INNER JOIN
+      solare_matches m
+      ON m.region = mp.region AND m.record_no = mp.record_no
+    WHERE
+      mp.region = $1
+      AND (
+        m.season = $2
+        OR ($2 = 9 AND m.season IS NULL)
+      )
+      AND NOT EXISTS (
+        SELECT 1
+        FROM solare_match_mode_proofs smp
+        WHERE smp.region = mp.region
+          AND smp.record_no = mp.record_no
+          AND smp.mode = 'practice'
+      )
+    GROUP BY
+      mp.user_no,
+      LOWER(mp.user_nickname),
+      mp.class_type,
+      mp.skill_branch_type
+  ),
+  player_class_counts AS (
+    SELECT
+      rp.dr_id,
+      scc.class_type,
+      scc.skill_branch_type,
+      scc.games,
+      scc.wins
+    FROM
+      ranking_players rp
+    INNER JOIN
+      season_class_counts scc
+      ON rp.user_no IS NOT NULL AND scc.user_no = rp.user_no
+    UNION ALL
+    SELECT
+      rp.dr_id,
+      scc.class_type,
+      scc.skill_branch_type,
+      scc.games,
+      scc.wins
+    FROM
+      ranking_players rp
+    INNER JOIN
+      season_class_counts scc
+      ON scc.nick_lower = LOWER(rp.user_nickname)
+      AND (rp.user_no IS NULL OR scc.user_no IS NULL)
+  ),
+  most_played_class AS (
+    SELECT DISTINCT ON (dr_id)
+      dr_id,
+      class_type,
+      skill_branch_type
+    FROM (
+      SELECT
+        dr_id,
+        class_type,
+        skill_branch_type,
+        SUM(games) AS games,
+        SUM(wins) AS wins
+      FROM
+        player_class_counts
+      GROUP BY
+        dr_id,
+        class_type,
+        skill_branch_type
+    ) totals
+    ORDER BY
+      dr_id,
+      games DESC,
+      wins DESC,
+      class_type ASC,
+      skill_branch_type ASC
+  )`;
+
 async function resolvePlayerRankingPositions({
   isPlayerRowForTargetSeason,
   playerRow,
@@ -1462,51 +1561,20 @@ async function resolvePlayerRankingPositions({
             updated_at DESC NULLS LAST,
             win_count DESC
         ),
+        ${RANKING_MOST_PLAYED_CLASS_CTES},
         ranking_with_most_played_class AS (
           SELECT
-            dr.user_no,
-            dr.user_nickname,
-            dr.current_ranking,
-            dr.rank_rating,
-            dr.rating_achieved_record_no,
-            dr.win_count,
-            COALESCE(mp_top.class_type, dr.class_type)::smallint AS class_type
+            rp.user_no,
+            rp.user_nickname,
+            rp.current_ranking,
+            rp.rank_rating,
+            rp.rating_achieved_record_no,
+            rp.win_count,
+            COALESCE(mpc.class_type, rp.class_type)::smallint AS class_type
           FROM
-            deduplicated_ranking dr
-          LEFT JOIN LATERAL (
-            SELECT
-              mp.class_type
-            FROM
-              solare_match_players mp
-            INNER JOIN
-              solare_matches m
-              ON m.region = mp.region AND m.record_no = mp.record_no
-            WHERE
-              mp.region = $1
-              AND (
-                m.season = $2
-                OR ($2 = 9 AND m.season IS NULL)
-              )
-              AND (
-                (dr.user_no IS NOT NULL AND mp.user_no = dr.user_no)
-                OR ((dr.user_no IS NULL OR mp.user_no IS NULL) AND LOWER(mp.user_nickname) = LOWER(dr.user_nickname))
-              )
-              AND NOT EXISTS (
-                SELECT 1
-                FROM solare_match_mode_proofs smp
-                WHERE smp.region = mp.region
-                  AND smp.record_no = mp.record_no
-                  AND smp.mode = 'practice'
-              )
-            GROUP BY
-              mp.class_type,
-              mp.skill_branch_type
-            ORDER BY
-              COUNT(*) DESC,
-              SUM(CASE WHEN mp.is_winner THEN 1 ELSE 0 END) DESC,
-              mp.class_type ASC
-            LIMIT 1
-          ) mp_top ON true
+            ranking_players rp
+          LEFT JOIN
+            most_played_class mpc ON mpc.dr_id = rp.dr_id
         ),
         ranked_with_class AS (
           SELECT
@@ -2366,57 +2434,25 @@ async function getRanking({ region, season, classType, headers } = {}) {
           updated_at DESC NULLS LAST,
           win_count DESC
       ),
+      ${RANKING_MOST_PLAYED_CLASS_CTES},
       ranking_with_most_played_class AS (
         SELECT
-          dr.user_no,
-          dr.user_nickname,
-          dr.current_ranking,
-          dr.rank_rating,
-          dr.rating_is_estimated,
-          dr.rating_achieved_record_no,
-          COALESCE(mp_top.class_type, dr.class_type)::smallint AS class_type,
-          COALESCE(mp_top.skill_branch_type, dr.skill_branch_type)::smallint AS skill_branch_type,
-          dr.win_count,
-          dr.lose_count,
-          dr.draw_count,
-          dr.updated_at
+          rp.user_no,
+          rp.user_nickname,
+          rp.current_ranking,
+          rp.rank_rating,
+          rp.rating_is_estimated,
+          rp.rating_achieved_record_no,
+          COALESCE(mpc.class_type, rp.class_type)::smallint AS class_type,
+          COALESCE(mpc.skill_branch_type, rp.skill_branch_type)::smallint AS skill_branch_type,
+          rp.win_count,
+          rp.lose_count,
+          rp.draw_count,
+          rp.updated_at
         FROM
-          deduplicated_ranking dr
-        LEFT JOIN LATERAL (
-          SELECT
-            mp.class_type,
-            mp.skill_branch_type
-          FROM
-            solare_match_players mp
-          INNER JOIN
-            solare_matches m
-            ON m.region = mp.region AND m.record_no = mp.record_no
-          WHERE
-            mp.region = $1
-            AND (
-              m.season = $2
-              OR ($2 = 9 AND m.season IS NULL)
-            )
-            AND (
-              (dr.user_no IS NOT NULL AND mp.user_no = dr.user_no)
-              OR ((dr.user_no IS NULL OR mp.user_no IS NULL) AND LOWER(mp.user_nickname) = LOWER(dr.user_nickname))
-            )
-            AND NOT EXISTS (
-              SELECT 1
-              FROM solare_match_mode_proofs smp
-              WHERE smp.region = mp.region
-                AND smp.record_no = mp.record_no
-                AND smp.mode = 'practice'
-            )
-          GROUP BY
-            mp.class_type,
-            mp.skill_branch_type
-          ORDER BY
-            COUNT(*) DESC,
-            SUM(CASE WHEN mp.is_winner THEN 1 ELSE 0 END) DESC,
-            mp.class_type ASC
-          LIMIT 1
-        ) mp_top ON true
+          ranking_players rp
+        LEFT JOIN
+          most_played_class mpc ON mpc.dr_id = rp.dr_id
       ),
       ranked_with_class AS (
         SELECT
