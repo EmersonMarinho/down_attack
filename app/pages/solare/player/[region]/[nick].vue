@@ -233,6 +233,15 @@
           </div>
         </header>
 
+        <!-- GEAR (crystals + alchemy stone) -->
+        <SolareGearPanel
+          v-if="gearPanel"
+          :gear="gearPanel.gear"
+          :sets="gearPanel.sets"
+          :title="gearPanel.title"
+          :source="gearPanel.source"
+        />
+
         <!-- MAIN BODY: SIDEBAR + MATCH HISTORY -->
         <div class="solare-main-grid">
           <!-- LEFT SIDEBAR -->
@@ -1091,6 +1100,57 @@
                     </div>
                   </div>
                 </div>
+
+                <!-- Equipment of every player, decoded from the replay -->
+                <div v-if="m.repz_download_url" class="solare-match-gear">
+                  <span class="solare-match-gear-title">GEAR</span>
+                  <p
+                    v-if="matchGearMap[m.record_no]?.status === 'loading'"
+                    class="solare-match-gear-note"
+                  >
+                    Reading the replay...
+                  </p>
+                  <p
+                    v-else-if="
+                      matchGearMap[m.record_no] &&
+                      matchGearMap[m.record_no].status !== 'ok'
+                    "
+                    class="solare-match-gear-note"
+                  >
+                    Gear unavailable for this replay.
+                  </p>
+                  <template v-else-if="matchGearMap[m.record_no]">
+                    <div
+                      v-for="team in m.teams"
+                      :key="`gear-${m.record_no}-${team.id}`"
+                      class="solare-match-gear-team"
+                    >
+                      <div
+                        v-for="p in team.players"
+                        :key="`gear-${m.record_no}-${p.user_nickname}`"
+                        class="solare-match-gear-row"
+                      >
+                        <span
+                          class="solare-match-gear-name"
+                          :style="{ color: team.color }"
+                        >
+                          {{ p.user_nickname }}
+                        </span>
+                        <SolareGearStrip
+                          v-if="findMatchLoadout(m.record_no, p.user_nickname)"
+                          :gear="
+                            findMatchLoadout(m.record_no, p.user_nickname).gear
+                          "
+                          :sets="
+                            findMatchLoadout(m.record_no, p.user_nickname)
+                              .crystal_sets
+                          "
+                        />
+                        <span v-else class="solare-match-gear-note">—</span>
+                      </div>
+                    </div>
+                  </template>
+                </div>
               </div>
             </article>
 
@@ -1433,6 +1493,78 @@ const primaryClassName = computed(() =>
 const primarySpecName = computed(() =>
   getSkillBranch(profile.value?.class_type, profile.value?.skill_branch_type),
 );
+
+// Equipment decoded from each match replay (/api/v1/solare/match/gear), keyed by record_no.
+const matchGearMap = ref({});
+
+async function loadMatchGear(recordNo) {
+  if (!recordNo || matchGearMap.value[recordNo]) return;
+  matchGearMap.value = {
+    ...matchGearMap.value,
+    [recordNo]: { status: "loading", players: [] },
+  };
+  try {
+    const data = await $fetch("/api/v1/solare/match/gear", {
+      query: { region: routeRegion.value, record_no: recordNo },
+    });
+    matchGearMap.value = { ...matchGearMap.value, [recordNo]: data };
+  } catch {
+    matchGearMap.value = {
+      ...matchGearMap.value,
+      [recordNo]: { status: "error", players: [] },
+    };
+  }
+}
+
+function findMatchLoadout(recordNo, nickname) {
+  const entry = matchGearMap.value[recordNo];
+  if (!entry?.players?.length || !nickname) return null;
+  const target = String(nickname).toLowerCase();
+  return (
+    entry.players.find((p) => p.user_nickname?.toLowerCase() === target) || null
+  );
+}
+
+// Latest match of this player that has an official replay to decode.
+const latestReplayMatch = computed(
+  () => loadedMatches.value.find((m) => m.repz_download_url) || null,
+);
+
+watch(
+  latestReplayMatch,
+  (match) => {
+    if (match) loadMatchGear(match.record_no);
+  },
+  { immediate: true },
+);
+
+watch(openMatchMap, (map) => {
+  for (const [recordNo, isOpen] of Object.entries(map)) {
+    if (isOpen) loadMatchGear(Number(recordNo));
+  }
+});
+
+const gearPanel = computed(() => {
+  const match = latestReplayMatch.value;
+  const p = profile.value;
+  if (!match || !p) return null;
+  const loadout = findMatchLoadout(match.record_no, p.user_nickname);
+  if (!loadout) return null;
+
+  const classType = match.allies?.find(
+    (a) => a.user_nickname?.toLowerCase() === p.user_nickname?.toLowerCase(),
+  );
+  const className = classType ? getClassName(classType.class_type) : "";
+  const specName = classType
+    ? getSkillBranch(classType.class_type, classType.skill_branch_type)
+    : "";
+  return {
+    gear: loadout.gear,
+    sets: loadout.crystal_sets || [],
+    title: [specName, className].filter(Boolean).join(" "),
+    source: `Last match #${match.record_no}`,
+  };
+});
 
 const primaryBranchIcon = computed(() =>
   getSkillBranchIcon(
@@ -2778,6 +2910,59 @@ onMounted(() => {
   }
   .solare-teams-grid {
     grid-template-columns: 1fr;
+  }
+}
+
+.solare-match-gear {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px 16px 14px;
+  border-top: 1px solid #26272c;
+}
+
+.solare-match-gear-title {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  color: #6f7078;
+}
+
+.solare-match-gear-team {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.solare-match-gear-team + .solare-match-gear-team {
+  padding-top: 6px;
+  border-top: 1px dashed #26272c;
+}
+
+.solare-match-gear-row {
+  display: grid;
+  grid-template-columns: 120px 1fr;
+  align-items: center;
+  gap: 10px;
+}
+
+.solare-match-gear-name {
+  font-size: 12px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.solare-match-gear-note {
+  font-size: 12px;
+  color: #7d7e86;
+}
+
+@media (max-width: 640px) {
+  .solare-match-gear-row {
+    grid-template-columns: 1fr;
+    gap: 4px;
   }
 }
 </style>
